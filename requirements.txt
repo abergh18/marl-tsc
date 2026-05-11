@@ -1,0 +1,7 @@
+pettingzoo
+gymnasium
+numpy
+traci
+sumolib
+jupyter
+matplotlib
