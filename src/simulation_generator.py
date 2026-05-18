@@ -1,16 +1,16 @@
-"""Utilities for generating SUMO simulation files.
-
-This module intentionally does not contain PettingZoo or reinforcement-learning
-logic. It only creates the files SUMO needs: network, trips, routes, and config.
-"""
+"""Generate a small SUMO grid for MARL traffic-signal-control experiments."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import os
 import subprocess
 import sys
+
+
+DEFAULT_TRAFFIC_LIGHT_IDS = ("B1", "B2", "C1", "C2")
 
 
 @dataclass
@@ -32,27 +32,26 @@ class SimulationGenerator:
         trips_filename: str = "trips.trips.xml",
         routes_filename: str = "routes.rou.xml",
         config_filename: str = "config.sumocfg",
-        network_type: str = "grid",
-        grid_number: int = 3,
+        grid_number: int = 4,
         lane_number: int = 1,
-        guess_tls: bool = True,
+        traffic_light_ids: Sequence[str] = DEFAULT_TRAFFIC_LIGHT_IDS,
         trip_begin: int = 0,
-        trip_end: int = 3600,
+        trip_end: int = 1000,
         trip_period: int = 2,
         seed: int = 42,
     ) -> None:
-        """Create SUMO networks and traffic demand files.
+        """Create a SUMO grid network, traffic demand, routes, and config.
 
         Args:
             output_dir: Directory where output files will be created.
-            network_filename: Name of the generated SUMO network file.
-            trips_filename: Name of the generated SUMO trips file.
-            routes_filename: Name of the generated SUMO routes file.
-            config_filename: Name of the generated SUMO config file.
-            network_type: netgenerate network type. This project starts with grid.
-            grid_number: Number of roads in each direction for a grid network.
+            network_filename: Generated SUMO network file name.
+            trips_filename: Generated SUMO trips file name.
+            routes_filename: Generated SUMO routes file name.
+            config_filename: Generated SUMO config file name.
+            grid_number: Junctions in each direction. The default 4x4 grid has
+                four center traffic lights: B1, B2, C1, and C2.
             lane_number: Number of lanes per road.
-            guess_tls: Whether SUMO should create guessed traffic lights.
+            traffic_light_ids: Junction IDs to turn into traffic-light agents.
             trip_begin: First simulation second when trips can be generated.
             trip_end: Last simulation second when trips can be generated.
             trip_period: Average seconds between generated vehicles.
@@ -65,10 +64,9 @@ class SimulationGenerator:
         self.routes_filename = routes_filename
         self.config_filename = config_filename
 
-        self.network_type = network_type
         self.grid_number = grid_number
         self.lane_number = lane_number
-        self.guess_tls = guess_tls
+        self.traffic_light_ids = tuple(traffic_light_ids)
 
         self.trip_begin = trip_begin
         self.trip_end = trip_end
@@ -81,8 +79,7 @@ class SimulationGenerator:
                 "SUMO_HOME is not set. Install SUMO and set SUMO_HOME before generating simulations."
             )
 
-        self.sumo_home = Path(sumo_home)
-        self.random_trips_file = self.sumo_home / "tools" / "randomTrips.py"
+        self.random_trips_file = Path(sumo_home) / "tools" / "randomTrips.py"
 
     @property
     def network_file(self) -> Path:
@@ -118,21 +115,19 @@ class SimulationGenerator:
         """Generate the SUMO network XML file."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.network_type != "grid":
-            raise NotImplementedError(
-                "This starter project currently supports network_type='grid'. "
-                "Add spider/rand options once the grid version works."
-            )
+        if not self.traffic_light_ids:
+            raise ValueError("traffic_light_ids must contain at least one junction ID.")
 
         command = [
             "netgenerate",
             "--grid",
             f"--grid.number={self.grid_number}",
-            f"--tls.guess={str(self.guess_tls).lower()}",
             f"--default.lanenumber={self.lane_number}",
             "-o",
             str(self.network_file),
         ]
+
+        command.extend(["--tls.set", ",".join(self.traffic_light_ids)])
 
         self.run_command(command)
         return self.network_file

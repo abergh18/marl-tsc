@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import sys
 from typing import Any
 
 import numpy as np
@@ -63,8 +64,8 @@ class SumoTrafficEnv(ParallelEnv):
             )
 
         tools_path = Path(sumo_home) / "tools"
-        if str(tools_path) not in os.sys.path:
-            os.sys.path.append(str(tools_path))
+        if str(tools_path) not in sys.path:
+            sys.path.append(str(tools_path))
 
         import traci  # type: ignore
 
@@ -111,14 +112,12 @@ class SumoTrafficEnv(ParallelEnv):
             controlled_lanes = list(dict.fromkeys(traci.trafficlight.getControlledLanes(tls_id)))
             self._tls_to_lanes[tls_id] = controlled_lanes[: self.max_lanes_per_tls]
 
-            program = traci.trafficlight.getCompleteRedYellowGreenDefinition(tls_id)[0]
-            green_phases: list[int] = []
-            for phase_index, phase in enumerate(program.phases):
-                state = phase.state.lower()
-                has_green = "g" in state
-                has_yellow = "y" in state
-                if has_green and not has_yellow:
-                    green_phases.append(phase_index)
+            program = traci.trafficlight.getAllProgramLogics(tls_id)[0]
+            green_phases = [
+                phase_index
+                for phase_index, phase in enumerate(program.phases)
+                if "g" in phase.state.lower() and "y" not in phase.state.lower()
+            ]
 
             # Fallback: if SUMO creates an unusual program, allow phase 0.
             if not green_phases:
