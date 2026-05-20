@@ -1,7 +1,9 @@
-pettingzoo
-gymnasium
-numpy
-traci
-sumolib
-jupyter
-matplotlib
+pettingzoo==1.26.1
+gymnasium==1.2.3
+numpy>=2.0,<2.3
+traci==1.26.0
+sumolib==1.26.0
+jupyter==1.1.1
+matplotlib>=3.9,<3.11
+supersuit==3.10.0
+stable-baselines3==2.8.0

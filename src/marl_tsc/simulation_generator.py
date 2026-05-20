@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import runpy
 from pathlib import Path
 import os
 import subprocess
@@ -40,23 +41,7 @@ class SimulationGenerator:
         trip_period: int = 2,
         seed: int = 42,
     ) -> None:
-        """Create a SUMO grid network, traffic demand, routes, and config.
-
-        Args:
-            output_dir: Directory where output files will be created.
-            network_filename: Generated SUMO network file name.
-            trips_filename: Generated SUMO trips file name.
-            routes_filename: Generated SUMO routes file name.
-            config_filename: Generated SUMO config file name.
-            grid_number: Junctions in each direction. The default 4x4 grid has
-                four center traffic lights: B1, B2, C1, and C2.
-            lane_number: Number of lanes per road.
-            traffic_light_ids: Junction IDs to turn into traffic-light agents.
-            trip_begin: First simulation second when trips can be generated.
-            trip_end: Last simulation second when trips can be generated.
-            trip_period: Average seconds between generated vehicles.
-            seed: Random seed used by SUMO's randomTrips.py.
-        """
+        """Create a SUMO grid network, traffic demand, routes, and config."""
 
         self.output_dir = Path(output_dir)
         self.network_filename = network_filename
@@ -141,26 +126,39 @@ class SimulationGenerator:
                 f"Network file does not exist: {self.network_file}. Run generate_network() first."
             )
 
-        command = [
-            sys.executable,
-            str(self.random_trips_file),
-            "-n",
-            str(self.network_file),
-            "-o",
-            str(self.trips_file),
-            "-r",
-            str(self.routes_file),
-            "--begin",
-            str(self.trip_begin),
-            "--end",
-            str(self.trip_end),
-            "--period",
-            str(self.trip_period),
-            "--seed",
-            str(self.seed),
-        ]
+        if not self.random_trips_file.exists():
+            raise FileNotFoundError(f"randomTrips.py not found: {self.random_trips_file}")
 
-        self.run_command(command)
+        tools_path = str(self.random_trips_file.parent)
+        if tools_path not in sys.path:
+            sys.path.insert(0, tools_path)
+
+        old_argv = sys.argv[:]
+        try:
+            sys.argv = [
+                str(self.random_trips_file),
+                "-n",
+                str(self.network_file),
+                "-o",
+                str(self.trips_file),
+                "-r",
+                str(self.routes_file),
+                "--begin",
+                str(self.trip_begin),
+                "--end",
+                str(self.trip_end),
+                "--period",
+                str(self.trip_period),
+                "--seed",
+                str(self.seed),
+            ]
+            runpy.run_path(str(self.random_trips_file), run_name="__main__")
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                raise subprocess.CalledProcessError(int(exc.code), sys.argv) from exc
+        finally:
+            sys.argv = old_argv
+
         return self.routes_file
 
     def generate_config(self) -> Path:
@@ -169,13 +167,13 @@ class SimulationGenerator:
 
         config_content = f"""<configuration>
     <input>
-        <net-file value=\"{self.network_file.name}\"/>
-        <route-files value=\"{self.routes_file.name}\"/>
+        <net-file value="{self.network_file.name}"/>
+        <route-files value="{self.routes_file.name}"/>
     </input>
 
     <time>
-        <begin value=\"{self.trip_begin}\"/>
-        <end value=\"{self.trip_end}\"/>
+        <begin value="{self.trip_begin}"/>
+        <end value="{self.trip_end}"/>
     </time>
 </configuration>
 """
