@@ -131,8 +131,8 @@ def train_mappo(
     config_file,
     traffic_light_ids,
     output_dir,
-    total_timesteps=50_000,
-    rollout_steps=256,
+    total_timesteps=150_000,
+    rollout_steps=1024,
     max_steps=1000,
     seed=42,
     env_kwargs=None,
@@ -205,7 +205,7 @@ def train_mappo(
     gamma = 0.99
     gae_lambda = 0.95
     clip_coef = 0.2
-    update_epochs = 4
+    update_epochs = 10
     entropy_coef = 0.01
     value_coef = 0.5
 
