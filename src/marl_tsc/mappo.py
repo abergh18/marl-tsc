@@ -13,6 +13,34 @@ def _stack_agent_observations(observations: dict[str, np.ndarray], agent_ids: tu
     return np.stack([np.asarray(observations[agent], dtype=np.float32) for agent in agent_ids], axis=0)
 
 
+def _stack_agent_masks(
+    infos: dict[str, dict] | None,
+    agent_ids: tuple[str, ...],
+    action_dim: int,
+) -> np.ndarray:
+    """Build a (num_agents, action_dim) mask from infos; default to all-ones if absent."""
+    if not infos:
+        return np.ones((len(agent_ids), action_dim), dtype=np.float32)
+
+    rows = []
+    for agent in agent_ids:
+        info = infos.get(agent) or {}
+        mask = info.get("action_mask")
+        if mask is None:
+            rows.append(np.ones(action_dim, dtype=np.float32))
+        else:
+            rows.append(np.asarray(mask, dtype=np.float32))
+    return np.stack(rows, axis=0)
+
+
+def _mask_logits(logits, mask):
+    """Set logits at masked-out actions to -inf so the Categorical zeroes them out."""
+    import torch
+
+    very_negative = torch.finfo(logits.dtype).min
+    return torch.where(mask > 0.5, logits, torch.full_like(logits, very_negative))
+
+
 def _compute_gae(
     rewards: np.ndarray,
     values: np.ndarray,
@@ -48,7 +76,12 @@ class MappoModel:
     device: str = "cpu"
     policy_name: str = "MAPPO"
 
-    def _act_single(self, observation: np.ndarray, deterministic: bool = True) -> int:
+    def _act_single(
+        self,
+        observation: np.ndarray,
+        mask: np.ndarray | None = None,
+        deterministic: bool = True,
+    ) -> int:
         import torch
         from torch.distributions import Categorical
 
@@ -56,6 +89,9 @@ class MappoModel:
 
         with torch.no_grad():
             logits = self.actor(obs_tensor.unsqueeze(0)).squeeze(0)
+            if mask is not None:
+                mask_tensor = torch.as_tensor(np.asarray(mask, dtype=np.float32), dtype=torch.float32, device=self.device)
+                logits = _mask_logits(logits, mask_tensor)
             if deterministic:
                 action_tensor = torch.argmax(logits, dim=-1)
             else:
@@ -63,11 +99,22 @@ class MappoModel:
 
         return int(action_tensor.item())
 
-    def act(self, observations: dict[str, np.ndarray], deterministic: bool = True) -> dict[str, int]:
-        return {
-            agent_id: self._act_single(observations[agent_id], deterministic=deterministic)
-            for agent_id in self.traffic_light_ids
-        }
+    def act(
+        self,
+        observations: dict[str, np.ndarray],
+        infos: dict[str, dict] | None = None,
+        deterministic: bool = True,
+    ) -> dict[str, int]:
+        actions: dict[str, int] = {}
+        for agent_id in self.traffic_light_ids:
+            mask = None
+            if infos is not None:
+                info = infos.get(agent_id) or {}
+                mask = info.get("action_mask")
+            actions[agent_id] = self._act_single(
+                observations[agent_id], mask=mask, deterministic=deterministic
+            )
+        return actions
 
     def predict(self, observation: np.ndarray, deterministic: bool = True):
         """SB3-style compatibility for single-agent evaluation paths."""
@@ -112,7 +159,7 @@ def train_mappo(
         **env_options,
     )
 
-    observations, _ = env.reset(seed=seed)
+    observations, infos = env.reset(seed=seed)
     agent_ids = tuple(traffic_light_ids)
     if not agent_ids:
         env.close()
@@ -171,6 +218,7 @@ def train_mappo(
         rollout_central_obs: list[np.ndarray] = []
         rollout_actions: list[np.ndarray] = []
         rollout_log_probs: list[np.ndarray] = []
+        rollout_masks: list[np.ndarray] = []
         rollout_rewards: list[float] = []
         rollout_values: list[float] = []
         rollout_dones: list[bool] = []
@@ -178,12 +226,15 @@ def train_mappo(
         while len(rollout_rewards) < rollout_steps and global_steps < total_timesteps:
             local_obs = _stack_agent_observations(observations, agent_ids)
             central_obs = local_obs.reshape(-1)
+            mask_array = _stack_agent_masks(infos, agent_ids, action_dim)
 
             with torch.no_grad():
                 local_obs_tensor = torch.as_tensor(local_obs, dtype=torch.float32, device=device)
                 central_obs_tensor = torch.as_tensor(central_obs, dtype=torch.float32, device=device)
+                mask_tensor = torch.as_tensor(mask_array, dtype=torch.float32, device=device)
                 logits = actor(local_obs_tensor)
-                dist = Categorical(logits=logits)
+                masked_logits = _mask_logits(logits, mask_tensor)
+                dist = Categorical(logits=masked_logits)
                 actions_tensor = dist.sample()
                 log_probs_tensor = dist.log_prob(actions_tensor)
                 value_tensor = critic(central_obs_tensor)
@@ -192,7 +243,7 @@ def train_mappo(
                 agent_id: int(action)
                 for agent_id, action in zip(agent_ids, actions_tensor.cpu().tolist())
             }
-            next_observations, rewards, terminations, truncations, _ = env.step(actions)
+            next_observations, rewards, terminations, truncations, next_infos = env.step(actions)
             team_reward = float(np.mean(list(rewards.values()))) if rewards else 0.0
             done = bool(any(terminations.values()) or any(truncations.values()))
 
@@ -200,16 +251,18 @@ def train_mappo(
             rollout_central_obs.append(central_obs)
             rollout_actions.append(np.asarray(actions_tensor.cpu().tolist(), dtype=np.int64))
             rollout_log_probs.append(np.asarray(log_probs_tensor.cpu().tolist(), dtype=np.float32))
+            rollout_masks.append(mask_array)
             rollout_rewards.append(team_reward)
             rollout_values.append(float(value_tensor.item()))
             rollout_dones.append(done)
 
             global_steps += 1
             observations = next_observations
+            infos = next_infos
 
             if done:
                 episode_index += 1
-                observations, _ = env.reset(seed=seed + episode_index)
+                observations, infos = env.reset(seed=seed + episode_index)
 
         if not rollout_rewards:
             break
@@ -239,6 +292,7 @@ def train_mappo(
         local_obs_batch = np.concatenate(rollout_local_obs, axis=0)
         action_batch = np.concatenate(rollout_actions, axis=0)
         old_log_prob_batch = np.concatenate(rollout_log_probs, axis=0)
+        mask_batch = np.concatenate(rollout_masks, axis=0)
         advantage_batch = np.repeat(advantages, num_agents)
         return_batch = torch.as_tensor(returns, dtype=torch.float32, device=device)
         central_obs_batch = torch.as_tensor(np.asarray(rollout_central_obs), dtype=torch.float32, device=device)
@@ -247,10 +301,12 @@ def train_mappo(
         actor_action_batch = torch.as_tensor(action_batch, dtype=torch.int64, device=device)
         old_log_prob_batch_tensor = torch.as_tensor(old_log_prob_batch, dtype=torch.float32, device=device)
         advantage_batch_tensor = torch.as_tensor(advantage_batch, dtype=torch.float32, device=device)
+        mask_batch_tensor = torch.as_tensor(mask_batch, dtype=torch.float32, device=device)
 
         for _ in range(update_epochs):
             logits = actor(actor_obs_batch)
-            dist = Categorical(logits=logits)
+            masked_logits = _mask_logits(logits, mask_batch_tensor)
+            dist = Categorical(logits=masked_logits)
             new_log_probs = dist.log_prob(actor_action_batch)
             ratio = torch.exp(new_log_probs - old_log_prob_batch_tensor)
             unclipped = ratio * advantage_batch_tensor

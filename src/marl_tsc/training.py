@@ -111,9 +111,18 @@ def _policy_name(policy) -> str:
     return getattr(policy, "__name__", policy.__class__.__name__)
 
 
-def _actions_from_policy(policy, env, observations, step_index: int) -> dict[str, int]:
+def _actions_from_policy(
+    policy,
+    env,
+    observations,
+    step_index: int,
+    infos: dict[str, dict] | None = None,
+) -> dict[str, int]:
     if hasattr(policy, "act") and callable(policy.act):
-        return policy.act(observations, deterministic=True)
+        try:
+            return policy.act(observations, infos=infos, deterministic=True)
+        except TypeError:
+            return policy.act(observations, deterministic=True)
 
     if hasattr(policy, "predict"):
         actions = {}
@@ -156,7 +165,7 @@ def evaluate_policy(
             seed=seed + episode_index,
             **env_options,
         )
-        observations, _ = env.reset(seed=seed + episode_index)
+        observations, infos = env.reset(seed=seed + episode_index)
 
         episode_reward = 0.0
         queue_sum = 0.0
@@ -169,7 +178,7 @@ def evaluate_policy(
                 if not env.agents:
                     break
 
-                actions = _actions_from_policy(policy, env, observations, step_index)
+                actions = _actions_from_policy(policy, env, observations, step_index, infos=infos)
                 observations, rewards, _, truncations, infos = env.step(actions)
 
                 episode_reward += float(sum(rewards.values()))

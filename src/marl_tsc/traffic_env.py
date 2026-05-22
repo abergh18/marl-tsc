@@ -23,7 +23,7 @@ class SumoTrafficEnv(ParallelEnv):
         config_file: str | Path,
         max_steps: int = 1000,
         seconds_per_action: int = 5,
-        max_lanes_per_tls: int = 16,
+        max_lanes_per_tls: int | None = None,
         green_phase_count: int = 4,
         max_queue_value: float = 100.0,
         min_green_seconds: int = 10,
@@ -58,6 +58,9 @@ class SumoTrafficEnv(ParallelEnv):
         self._sumo_running = False
 
         self._traci = None
+
+        if self.max_lanes_per_tls is None:
+            self._probe_network_for_lane_count()
 
     def _import_traci(self):
         if self._traci is not None:
@@ -103,6 +106,37 @@ class SumoTrafficEnv(ParallelEnv):
             ]
         )
         self._sumo_running = True
+
+    def _probe_network_for_lane_count(self) -> None:
+        """Briefly start SUMO to size obs to the network's real lane count."""
+        traci = self._import_traci()
+        self._start_sumo(seed=self.seed)
+        try:
+            discovered = list(dict.fromkeys(traci.trafficlight.getIDList()))
+            if not discovered:
+                raise ValueError("No SUMO traffic lights were discovered during probe.")
+
+            if self.requested_agents:
+                missing = [a for a in self.requested_agents if a not in discovered]
+                if missing:
+                    raise ValueError(
+                        "Requested traffic lights are missing from SUMO: "
+                        + ", ".join(repr(a) for a in missing)
+                    )
+                target_ids = self.requested_agents
+            else:
+                target_ids = discovered
+
+            max_lanes = 0
+            for tls_id in target_ids:
+                lanes = list(dict.fromkeys(traci.trafficlight.getControlledLanes(tls_id)))
+                if len(lanes) > max_lanes:
+                    max_lanes = len(lanes)
+
+            self.max_lanes_per_tls = max(max_lanes, 1)
+        finally:
+            traci.close()
+            self._sumo_running = False
 
     def _discover_agents_and_lanes(self) -> None:
         traci = self._import_traci()
@@ -184,6 +218,27 @@ class SumoTrafficEnv(ParallelEnv):
         elapsed = self._elapsed_green_seconds.get(agent, 0.0)
         return 1.0 if elapsed >= self.min_green_seconds else 0.0
 
+    def _elapsed_green_normalized(self, agent: str) -> float:
+        """Normalised time spent in the current green phase, in [0, 1].
+
+        Scaled so the min-green threshold sits at 0.25, giving the policy
+        graded resolution well past the switch boundary.
+        """
+        elapsed = self._elapsed_green_seconds.get(agent, 0.0)
+        scale = max(self.min_green_seconds, 1) * 4.0
+        return float(min(elapsed / scale, 1.0))
+
+    def action_mask(self, agent: str) -> np.ndarray:
+        """1.0 for legal actions, 0.0 for actions the env would silently ignore."""
+        mask = np.zeros(self.green_phase_count, dtype=np.float32)
+        if self._elapsed_green_seconds.get(agent, 0.0) >= self.min_green_seconds:
+            mask[:] = 1.0
+        else:
+            current = self._current_actions.get(agent, 0)
+            current = max(0, min(current, self.green_phase_count - 1))
+            mask[current] = 1.0
+        return mask
+
     def _get_obs_for_agent(self, agent: str) -> np.ndarray:
         traci = self._import_traci()
         lanes = self._tls_to_lanes.get(agent, [])
@@ -197,7 +252,7 @@ class SumoTrafficEnv(ParallelEnv):
             values.append(0.0)
 
         values.append(self._current_phase_normalized(agent))
-        values.append(self._min_green_satisfied(agent))
+        values.append(self._elapsed_green_normalized(agent))
         return np.array(values, dtype=np.float32)
 
     def _get_obs(self) -> dict[str, np.ndarray]:
@@ -227,7 +282,7 @@ class SumoTrafficEnv(ParallelEnv):
         self._discover_agents_and_lanes()
 
         observations = self._get_obs()
-        infos = {agent: {} for agent in self.agents}
+        infos = {agent: {"action_mask": self.action_mask(agent)} for agent in self.agents}
         return observations, infos
 
     def step(self, actions: dict[str, int]):
@@ -285,6 +340,7 @@ class SumoTrafficEnv(ParallelEnv):
                 "switched": self._switched_last_step.get(agent, False),
                 "current_action": current_action,
                 "min_green_satisfied": self._min_green_satisfied(agent),
+                "action_mask": self.action_mask(agent),
             }
 
         if truncated:
