@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 
-DEFAULT_TRAFFIC_LIGHT_IDS = ("B1", "B2", "C1", "C2")
+DEFAULT_TRAFFIC_LIGHT_IDS = ("B1", "B2", "C1", "C2")# TODO: Extract dynamically from the net file instead of hardcoding these IDs. This is just to match the MAPPO notebook for now, but ideally the generator should be more flexible and not require manual updates to the traffic light IDs.
 
 
 @dataclass
@@ -108,6 +108,7 @@ class SimulationGenerator:
             "--grid",
             f"--grid.number={self.grid_number}",
             f"--default.lanenumber={self.lane_number}",
+            "--tls.layout", "incoming",
             "-o",
             str(self.network_file),
         ]

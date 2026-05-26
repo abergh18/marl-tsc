@@ -1,7 +1,9 @@
 """Training and evaluation helpers for the notebook.
 
-Shared PPO use parameter sharing through the PettingZoo/SuperSuit/SB3
-wrapper. This is not true MAPPO because the critic is not centralized.
+This module provides utilities to bridge the PettingZoo environment with 
+Stable Baselines3 (SB3). It includes wrappers for vectorized environments, 
+custom logging callbacks, and centralized evaluation logic that supports 
+both RL models and heuristic baselines.
 """
 
 from __future__ import annotations
@@ -13,12 +15,24 @@ import numpy as np
 
 
 def _make_vec_env(env):
+    """
+    Converts a PettingZoo ParallelEnv into a Stable Baselines3 VecEnv.
+    
+    This uses SuperSuit to:
+    1. Convert the multi-agent dict-based API to a single-agent-style vector API.
+    2. Concatenate agents into a single batch (parameter sharing).
+    3. Ensure compatibility with SB3's expectation of a DummyVecEnv/SubprocVecEnv.
+    """
     import supersuit as ss
 
+    # Convert PettingZoo Parallel environment to a VecEnv
     vec_env = ss.pettingzoo_env_to_vec_env_v1(env)
+    # Wrap it so it looks like a standard SB3 VecEnv with 1 "logical" environment
     vec_env = ss.concat_vec_envs_v1(vec_env, 1, num_cpus=1, base_class="stable_baselines3")
 
+    # Patch the environment to support the 'seed' method if missing
     target_env = vec_env.venv if hasattr(vec_env, "venv") else vec_env
+    # SB3 environments often require a .seed() method which SuperSuit might not expose directly
     if not hasattr(target_env, "seed"):
 
         def seed_env(seed_value=None):
@@ -35,15 +49,39 @@ def _make_vec_env(env):
 
 
 def _make_reward_logger_callback(algorithm_name: str):
+    """Factory for a Stable Baselines3 callback that logs performance metrics."""
     from stable_baselines3.common.callbacks import BaseCallback
+    from collections import deque
 
     class RewardLoggerCallback(BaseCallback):
+        """Logs per-step rewards and computes moving average returns during training."""
         def __init__(self):
             super().__init__()
+            # Stores metrics for later plotting
             self.history: list[dict[str, Any]] = []
+            # Tracks last 100 episode returns for a smoothed performance view
+            self.episode_returns = deque(maxlen=100)
+            # Accumulator for returns across the vectorized environments
+            self.current_returns = None
 
         def _on_step(self):
             rewards = self.locals.get("rewards")
+            dones = self.locals.get("dones")
+
+            if self.current_returns is None and rewards is not None:
+                self.current_returns = np.zeros(len(rewards))
+
+            # Update running returns and check for finished episodes
+            if rewards is not None and dones is not None:
+                self.current_returns += rewards
+                for i, done in enumerate(dones):
+                    if done:
+                        # Episode finished: record total return and reset accumulator
+                        episode_ret = float(self.current_returns[i])
+                        self.episode_returns.append(episode_ret)
+                        print(f"[{algorithm_name.upper()}] Step {self.num_timesteps} | Episode Return: {episode_ret:.2f}")
+                        self.current_returns[i] = 0.0
+
             if rewards is not None:
                 reward_values = [float(reward) for reward in rewards]
                 mean_reward = sum(reward_values) / len(reward_values) if reward_values else 0.0
@@ -52,6 +90,7 @@ def _make_reward_logger_callback(algorithm_name: str):
                         "algorithm": algorithm_name,
                         "timestep": int(self.num_timesteps),
                         "mean_training_reward": mean_reward,
+                        "moving_avg_episode_return": float(np.mean(self.episode_returns)) if self.episode_returns else 0.0,
                     }
                 )
             return True
@@ -68,11 +107,12 @@ def train_ppo(
     seed=42,
     env_kwargs=None,
 ):
-    """Train a shared-policy SB3 model and return the model, history, and path."""
+    """Sets up the environment and trains a PPO model using parameter sharing."""
 
     from stable_baselines3 import PPO
     from marl_tsc.traffic_env import SumoTrafficEnv
 
+    # Used for logging and file naming
     algorithm = "ppo"
 
     env_options = dict(env_kwargs or {})
@@ -84,9 +124,11 @@ def train_ppo(
         **env_options,
     )
 
+    # Wrap the PettingZoo env for SB3
     vec_env = _make_vec_env(env)
     model = PPO("MlpPolicy", vec_env, verbose=0, seed=seed, n_steps=1024, batch_size=256)
 
+    # Setup training monitoring
     reward_logger = _make_reward_logger_callback(algorithm)
     output_dir = Path(output_dir)
     model_path = output_dir / f"{algorithm}_sumo_traffic"
@@ -96,12 +138,14 @@ def train_ppo(
         output_dir.mkdir(parents=True, exist_ok=True)
         model.save(model_path)
     finally:
+        # Ensure SUMO processes are closed even if training crashes
         vec_env.close()
 
     return model, reward_logger.history, model_path.with_suffix(".zip")
 
 
 def _policy_name(policy) -> str:
+    """Helper to extract a string identifier for different policy types."""
     policy_name = getattr(policy, "policy_name", None)
     if policy_name:
         return str(policy_name)
@@ -118,12 +162,22 @@ def _actions_from_policy(
     step_index: int,
     infos: dict[str, dict] | None = None,
 ) -> dict[str, int]:
+    """
+    Dispatches observation data to the provided policy and returns agent actions.
+    
+    Supports:
+    1. Custom class instances with an .act() method (e.g., MappoModel).
+    2. Stable Baselines3 models via .predict().
+    3. Functional baselines (e.g., random_actions).
+    """
+    # Case 1: Custom MAPPO-style models
     if hasattr(policy, "act") and callable(policy.act):
         try:
             return policy.act(observations, infos=infos, deterministic=True)
         except TypeError:
             return policy.act(observations, deterministic=True)
 
+    # Case 2: SB3 Models (Individual predictions per agent)
     if hasattr(policy, "predict"):
         actions = {}
         for agent in env.agents:
@@ -131,6 +185,7 @@ def _actions_from_policy(
             actions[agent] = int(action)
         return actions
 
+    # Case 3: Baseline functions (random, fixed-time)
     actions = policy(env, step_index)
     if isinstance(actions, dict):
         return {agent: int(actions.get(agent, 0)) for agent in env.agents}
@@ -147,7 +202,12 @@ def evaluate_policy(
     seed=42,
     env_kwargs=None,
 ):
-    """Evaluate an SB3 model or a baseline action helper."""
+    """
+    Evaluates a policy over multiple episodes and returns performance metrics.
+    
+    Collects total reward, average queue lengths across all controlled lanes, 
+    and the number of traffic light phase switches.
+    """
 
     from marl_tsc.traffic_env import SumoTrafficEnv
 
@@ -182,6 +242,7 @@ def evaluate_policy(
                 observations, rewards, _, truncations, infos = env.step(actions)
 
                 episode_reward += float(sum(rewards.values()))
+                # Aggregate metrics from the info dict provided by SumoTrafficEnv
                 for info in infos.values():
                     queue_sum += float(info.get("mean_local_queue", 0.0))
                     queue_count += 1
@@ -191,8 +252,10 @@ def evaluate_policy(
                 if all(truncations.values()):
                     break
         finally:
+            # Shutdown SUMO for this episode
             env.close()
 
+        print(f"Finished Evaluation Episode {episode_index + 1}/{episodes} - Total Reward: {episode_reward:.2f}")
         episode_rewards.append(episode_reward)
         episode_queues.append(queue_sum / queue_count if queue_count else 0.0)
         episode_switches.append(switch_count)
@@ -213,6 +276,7 @@ def plot_training_histories(histories):
 
     import matplotlib.pyplot as plt
 
+    # Organize history by algorithm for multiple lines on one plot
     grouped = defaultdict(list)
     for record in histories:
         grouped[str(record["algorithm"])].append(record)
@@ -230,5 +294,36 @@ def plot_training_histories(histories):
     ax.set_title("Training convergence")
     if grouped:
         ax.legend()
+    fig.tight_layout()
+    return fig, ax
+
+def plot_moving_average_histories(histories, window=100):
+    """Plot training reward curves smoothed by a moving average window.
+    
+    This handles noisy step-rewards by showing the trend over time.
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    if not histories:
+        return None, None
+
+    df = pd.DataFrame(histories)
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for algorithm in df['algorithm'].unique():
+        algo_df = df[df['algorithm'] == algorithm].sort_values('timestep')
+        
+        # Prioritize episode return if available, else use step reward
+        metric = "moving_avg_episode_return" if "moving_avg_episode_return" in algo_df.columns else "mean_training_reward"
+        smoothed = algo_df[metric].rolling(window=window, min_periods=1).mean()
+        
+        line, = ax.plot(algo_df['timestep'], smoothed, label=f"{algorithm.upper()} (Smooth)")
+        ax.plot(algo_df['timestep'], algo_df[metric], alpha=0.15, color=line.get_color())
+
+    ax.set_xlabel("Timesteps")
+    ax.set_ylabel("Reward")
+    ax.set_title(f"Training Performance ({window}-pt Moving Average)")
+    ax.legend()
     fig.tight_layout()
     return fig, ax

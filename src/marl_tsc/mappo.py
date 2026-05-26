@@ -41,7 +41,41 @@ def _mask_logits(logits, mask):
     return torch.where(mask > 0.5, logits, torch.full_like(logits, very_negative))
 
 
-def _compute_gae(
+class RunningMeanStd:
+    """Welford-style running statistics over a stream of scalar values.
+
+    Used to normalise critic targets so the value head only ever sees roughly
+    zero-mean, unit-variance returns; predictions are denormalised when fed
+    back into GAE so advantages keep their real-world scale.
+    """
+
+    def __init__(self) -> None:
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = 1e-4
+
+    def update(self, batch: np.ndarray) -> None:
+        batch = np.asarray(batch, dtype=np.float64).reshape(-1)
+        n = batch.size
+        if n == 0:
+            return
+        batch_mean = float(batch.mean())
+        batch_var = float(batch.var())
+        delta = batch_mean - self.mean
+        new_count = self.count + n
+        self.mean = self.mean + delta * n / new_count
+        m_a = self.var * self.count
+        m_b = batch_var * n
+        m2 = m_a + m_b + (delta ** 2) * self.count * n / new_count
+        self.var = m2 / new_count
+        self.count = new_count
+
+    @property
+    def std(self) -> float:
+        return float(np.sqrt(max(self.var, 1e-8)))
+
+
+def _compute_gae( # GAE: Generalized Advantage Estimation
     rewards: np.ndarray,
     values: np.ndarray,
     dones: np.ndarray,
@@ -131,8 +165,8 @@ def train_mappo(
     config_file,
     traffic_light_ids,
     output_dir,
-    total_timesteps=150_000,
-    rollout_steps=1024,
+    total_timesteps=50_000,
+    rollout_steps=256,
     max_steps=1000,
     seed=42,
     env_kwargs=None,
@@ -169,6 +203,7 @@ def train_mappo(
     action_dim = int(env.action_space(agent_ids[0]).n)
     num_agents = len(agent_ids)
     hidden_size = 64
+    critic_hidden_size = 256
 
     class Actor(nn.Module):
         def __init__(self, obs_size: int, action_size: int) -> None:
@@ -188,11 +223,11 @@ def train_mappo(
         def __init__(self, central_obs_size: int) -> None:
             super().__init__()
             self.net = nn.Sequential(
-                nn.Linear(central_obs_size, hidden_size),
+                nn.Linear(central_obs_size, critic_hidden_size),
                 nn.ReLU(),
-                nn.Linear(hidden_size, hidden_size),
+                nn.Linear(critic_hidden_size, critic_hidden_size),
                 nn.ReLU(),
-                nn.Linear(hidden_size, 1),
+                nn.Linear(critic_hidden_size, 1),
             )
 
         def forward(self, central_obs: torch.Tensor) -> torch.Tensor:
@@ -200,18 +235,24 @@ def train_mappo(
 
     actor = Actor(obs_dim, action_dim).to(device)
     critic = Critic(obs_dim * num_agents).to(device)
-    optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=3e-4)
+    optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=2e-4)
 
     gamma = 0.99
     gae_lambda = 0.95
     clip_coef = 0.2
     update_epochs = 10
-    entropy_coef = 0.01
+    entropy_coef = 0.1
     value_coef = 0.5
+
+    value_norm = RunningMeanStd()
 
     history: list[dict[str, Any]] = []
     global_steps = 0
     episode_index = 0
+
+    from collections import deque
+    episode_returns = deque(maxlen=100)
+    current_episode_return = 0.0
 
     while global_steps < total_timesteps:
         rollout_local_obs: list[np.ndarray] = []
@@ -223,6 +264,13 @@ def train_mappo(
         rollout_values: list[float] = []
         rollout_dones: list[bool] = []
 
+        # --- Rollout Collection Phase ---
+        # Interact with the environment for `rollout_steps` to gather a trajectory of experiences.
+        # For MAPPO, we record:
+        # - Local observations: Used by the shared Actor network for decentralized execution.
+        # - Centralized observations: Concatenated views used by the Critic for centralized training.
+        # - Action masks: Ensures the Categorical distribution only samples valid green phases.
+        # - Shared team rewards: The mean reward across agents to encourage global traffic optimization.
         while len(rollout_rewards) < rollout_steps and global_steps < total_timesteps:
             local_obs = _stack_agent_observations(observations, agent_ids)
             central_obs = local_obs.reshape(-1)
@@ -247,26 +295,35 @@ def train_mappo(
             team_reward = float(np.mean(list(rewards.values()))) if rewards else 0.0
             done = bool(any(terminations.values()) or any(truncations.values()))
 
+            value_denorm = float(value_tensor.item()) * value_norm.std + value_norm.mean
+
             rollout_local_obs.append(local_obs)
             rollout_central_obs.append(central_obs)
             rollout_actions.append(np.asarray(actions_tensor.cpu().tolist(), dtype=np.int64))
             rollout_log_probs.append(np.asarray(log_probs_tensor.cpu().tolist(), dtype=np.float32))
             rollout_masks.append(mask_array)
             rollout_rewards.append(team_reward)
-            rollout_values.append(float(value_tensor.item()))
+            rollout_values.append(value_denorm)
             rollout_dones.append(done)
 
             global_steps += 1
             observations = next_observations
             infos = next_infos
+            current_episode_return += team_reward
 
             if done:
                 episode_index += 1
+                episode_returns.append(current_episode_return)
+                print(f"[MAPPO] Episode {episode_index} | Return: {current_episode_return:.2f} | Total Steps: {global_steps}")
+                current_episode_return = 0.0
                 observations, infos = env.reset(seed=seed + episode_index)
 
         if not rollout_rewards:
             break
 
+        # --- Value Bootstrapping ---
+        # If the rollout episode hasn't reached a terminal state, we bootstrap 
+        # the value of the last state to ensure correct advantage estimation.
         if rollout_dones[-1]:
             last_value = 0.0
         else:
@@ -274,11 +331,15 @@ def train_mappo(
                 next_local_obs = _stack_agent_observations(observations, agent_ids)
                 next_central_obs = next_local_obs.reshape(-1)
                 next_central_obs_tensor = torch.as_tensor(next_central_obs, dtype=torch.float32, device=device)
-                last_value = float(critic(next_central_obs_tensor).item())
+                raw_value = float(critic(next_central_obs_tensor).item())
+                last_value = raw_value * value_norm.std + value_norm.mean
 
         rewards_array = np.asarray(rollout_rewards, dtype=np.float32)
         values_array = np.asarray(rollout_values, dtype=np.float32)
         dones_array = np.asarray(rollout_dones, dtype=np.bool_)
+
+        # --- Advantage Estimation (GAE) ---
+        # We use Generalized Advantage Estimation to compute targets for both actor and critic.
         advantages, returns = _compute_gae(
             rewards_array,
             values_array,
@@ -287,14 +348,23 @@ def train_mappo(
             gamma,
             gae_lambda,
         )
+        #Advantage normalisation
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
+        normalised_returns = (returns - value_norm.mean) / value_norm.std
+        value_norm.update(returns)
+
+        # --- Batch Preparation & Normalization ---
+        # Convert gathered trajectories into flattened PyTorch tensors. 
+        # In parameter-sharing MAPPO, all agents' local observations are treated as 
+        # part of the same batch to train the shared actor network.
+        # Advantages are normalized to zero-mean/unit-variance to stabilize the gradient.
         local_obs_batch = np.concatenate(rollout_local_obs, axis=0)
         action_batch = np.concatenate(rollout_actions, axis=0)
         old_log_prob_batch = np.concatenate(rollout_log_probs, axis=0)
         mask_batch = np.concatenate(rollout_masks, axis=0)
         advantage_batch = np.repeat(advantages, num_agents)
-        return_batch = torch.as_tensor(returns, dtype=torch.float32, device=device)
+        return_batch = torch.as_tensor(normalised_returns, dtype=torch.float32, device=device)
         central_obs_batch = torch.as_tensor(np.asarray(rollout_central_obs), dtype=torch.float32, device=device)
 
         actor_obs_batch = torch.as_tensor(local_obs_batch, dtype=torch.float32, device=device)
@@ -303,6 +373,9 @@ def train_mappo(
         advantage_batch_tensor = torch.as_tensor(advantage_batch, dtype=torch.float32, device=device)
         mask_batch_tensor = torch.as_tensor(mask_batch, dtype=torch.float32, device=device)
 
+        # --- Policy & Value Network Updates ---
+        # Optimize the shared actor and centralized critic using the PPO clipped 
+        # surrogate objective across multiple epochs.
         for _ in range(update_epochs):
             logits = actor(actor_obs_batch)
             masked_logits = _mask_logits(logits, mask_batch_tensor)
@@ -311,6 +384,9 @@ def train_mappo(
             ratio = torch.exp(new_log_probs - old_log_prob_batch_tensor)
             unclipped = ratio * advantage_batch_tensor
             clipped = torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef) * advantage_batch_tensor
+            
+            # The PPO clipped surrogate objective: take the minimum of the clipped and 
+            # unclipped values to prevent over-optimistic policy updates.
             policy_loss = -torch.min(unclipped, clipped).mean()
             entropy_loss = dist.entropy().mean()
 
@@ -323,11 +399,14 @@ def train_mappo(
             torch.nn.utils.clip_grad_norm_(list(actor.parameters()) + list(critic.parameters()), 0.5)
             optimizer.step()
 
+        # --- Metrics Logging ---
+        # Record training progress for visualization in the notebook.
         history.append(
             {
                 "algorithm": "mappo",
                 "timestep": global_steps,
                 "mean_training_reward": float(np.mean(rewards_array)),
+                "moving_avg_episode_return": float(np.mean(episode_returns)) if episode_returns else 0.0,
             }
         )
 
@@ -366,6 +445,9 @@ def train_mappo(
         {
             "actor_state_dict": actor.state_dict(),
             "critic_state_dict": critic.state_dict(),
+            "value_norm_mean": value_norm.mean,
+            "value_norm_var": value_norm.var,
+            "value_norm_count": value_norm.count,
             "config": model.config,
         },
         model_path,
