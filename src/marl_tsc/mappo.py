@@ -227,11 +227,11 @@ def train_mappo(
                 nn.ReLU(),
                 nn.Linear(critic_hidden_size, critic_hidden_size),
                 nn.ReLU(),
-                nn.Linear(critic_hidden_size, 1),
+                nn.Linear(critic_hidden_size, num_agents),
             )
 
         def forward(self, central_obs: torch.Tensor) -> torch.Tensor:
-            return self.net(central_obs).squeeze(-1)
+            return self.net(central_obs)
 
     actor = Actor(obs_dim, action_dim).to(device)
     critic = Critic(obs_dim * num_agents).to(device)
@@ -243,6 +243,7 @@ def train_mappo(
     update_epochs = 10
     entropy_coef = 0.001
     value_coef = 0.5
+    local_reward_weight = 0.8
 
     value_norm = RunningMeanStd()
 
@@ -260,8 +261,8 @@ def train_mappo(
         rollout_actions: list[np.ndarray] = []
         rollout_log_probs: list[np.ndarray] = []
         rollout_masks: list[np.ndarray] = []
-        rollout_rewards: list[float] = []
-        rollout_values: list[float] = []
+        rollout_rewards: list[np.ndarray] = []
+        rollout_values: list[np.ndarray] = []
         rollout_dones: list[bool] = []
 
         # --- Rollout Collection Phase ---
@@ -270,7 +271,7 @@ def train_mappo(
         # - Local observations: Used by the shared Actor network for decentralized execution.
         # - Centralized observations: Concatenated views used by the Critic for centralized training.
         # - Action masks: Ensures the Categorical distribution only samples valid green phases.
-        # - Shared team rewards: The mean reward across agents to encourage global traffic optimization.
+        # - Blended rewards: Mostly local reward, with a small global queue signal.
         while len(rollout_rewards) < rollout_steps and global_steps < total_timesteps:
             local_obs = _stack_agent_observations(observations, agent_ids)
             central_obs = local_obs.reshape(-1)
@@ -292,24 +293,26 @@ def train_mappo(
                 for agent_id, action in zip(agent_ids, actions_tensor.cpu().tolist())
             }
             next_observations, rewards, terminations, truncations, next_infos = env.step(actions)
-            team_reward = float(np.mean(list(rewards.values()))) if rewards else 0.0
+            local_rewards = np.asarray([float(rewards.get(agent_id, 0.0)) for agent_id in agent_ids], dtype=np.float32)
+            global_reward = float(np.mean(local_rewards)) if local_rewards.size else 0.0
+            blended_rewards = local_reward_weight * local_rewards + (1.0 - local_reward_weight) * global_reward
             done = bool(any(terminations.values()) or any(truncations.values()))
 
-            value_denorm = float(value_tensor.item()) * value_norm.std + value_norm.mean
+            value_denorm = value_tensor.detach().cpu().numpy().astype(np.float32) * value_norm.std + value_norm.mean
 
             rollout_local_obs.append(local_obs)
             rollout_central_obs.append(central_obs)
             rollout_actions.append(np.asarray(actions_tensor.cpu().tolist(), dtype=np.int64))
             rollout_log_probs.append(np.asarray(log_probs_tensor.cpu().tolist(), dtype=np.float32))
             rollout_masks.append(mask_array)
-            rollout_rewards.append(team_reward)
+            rollout_rewards.append(blended_rewards)
             rollout_values.append(value_denorm)
             rollout_dones.append(done)
 
             global_steps += 1
             observations = next_observations
             infos = next_infos
-            current_episode_return += team_reward
+            current_episode_return += float(np.mean(blended_rewards))
 
             if done:
                 episode_index += 1
@@ -325,13 +328,13 @@ def train_mappo(
         # If the rollout episode hasn't reached a terminal state, we bootstrap 
         # the value of the last state to ensure correct advantage estimation.
         if rollout_dones[-1]:
-            last_value = 0.0
+            last_value = np.zeros(num_agents, dtype=np.float32)
         else:
             with torch.no_grad():
                 next_local_obs = _stack_agent_observations(observations, agent_ids)
                 next_central_obs = next_local_obs.reshape(-1)
                 next_central_obs_tensor = torch.as_tensor(next_central_obs, dtype=torch.float32, device=device)
-                raw_value = float(critic(next_central_obs_tensor).item())
+                raw_value = critic(next_central_obs_tensor).detach().cpu().numpy().astype(np.float32)
                 last_value = raw_value * value_norm.std + value_norm.mean
 
         rewards_array = np.asarray(rollout_rewards, dtype=np.float32)
@@ -363,7 +366,7 @@ def train_mappo(
         action_batch = np.concatenate(rollout_actions, axis=0)
         old_log_prob_batch = np.concatenate(rollout_log_probs, axis=0)
         mask_batch = np.concatenate(rollout_masks, axis=0)
-        advantage_batch = np.repeat(advantages, num_agents)
+        advantage_batch = advantages.reshape(-1)
         return_batch = torch.as_tensor(normalised_returns, dtype=torch.float32, device=device)
         central_obs_batch = torch.as_tensor(np.asarray(rollout_central_obs), dtype=torch.float32, device=device)
 
@@ -433,6 +436,7 @@ def train_mappo(
             "update_epochs": update_epochs,
             "entropy_coef": entropy_coef,
             "value_coef": value_coef,
+            "local_reward_weight": local_reward_weight,
             "env_kwargs": env_options,
         },
         device=str(device),

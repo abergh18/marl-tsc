@@ -13,11 +13,12 @@ def random_actions(env: Any, step_index: int | None = None) -> dict[str, int]:
 
 
 def fixed_time_actions(env: Any, step_index: int) -> dict[str, int]:
-    """Cycle all agents through the same action at a given step."""
+    """Switch phases on a simple fixed schedule."""
 
     agents = list(env.agents or env.possible_agents)
     if not agents:
         return {}
 
-    action = step_index % env.green_phase_count
+    steps_per_phase = max(env.min_green_seconds // env.seconds_per_action, 1)
+    action = 1 if (step_index + 1) % steps_per_phase == 0 else 0
     return {agent: action for agent in agents}

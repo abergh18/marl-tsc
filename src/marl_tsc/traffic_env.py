@@ -236,8 +236,12 @@ class SumoTrafficEnv(ParallelEnv):
         )
 
     def action_space(self, agent: str) -> Discrete:
-        """Returns the action space for a specific agent."""
-        return Discrete(self.green_phase_count)
+        """Returns the action space for a specific agent.
+
+        Action 0 holds the current green phase. Action 1 switches to the next
+        green phase when the minimum green time has passed.
+        """
+        return Discrete(2)
 
     def _current_phase_normalized(self, agent: str) -> float:
         current_action = self._current_actions.get(agent, 0)
@@ -265,13 +269,13 @@ class SumoTrafficEnv(ParallelEnv):
         Actions are restricted if the minimum green time requirement has not
         been met, forcing the agent to stay in its current phase.
         """
-        mask = np.zeros(self.green_phase_count, dtype=np.float32)
-        if self._elapsed_green_seconds.get(agent, 0.0) >= self.min_green_seconds:
-            mask[:] = 1.0
-        else:
-            current = self._current_actions.get(agent, 0)
-            current = max(0, min(current, self.green_phase_count - 1))
-            mask[current] = 1.0
+        mask = np.zeros(2, dtype=np.float32)
+        mask[0] = 1.0
+        if (
+            self.green_phase_count > 1
+            and self._elapsed_green_seconds.get(agent, 0.0) >= self.min_green_seconds
+        ):
+            mask[1] = 1.0
         return mask
 
     def _get_obs_for_agent(self, agent: str) -> np.ndarray:
@@ -349,20 +353,21 @@ class SumoTrafficEnv(ParallelEnv):
                 continue
 
             requested_action = int(actions[agent])
-            if requested_action < 0 or requested_action >= self.green_phase_count:
+            if requested_action < 0 or requested_action > 1:
                 raise ValueError(
                     f"Action {requested_action} is out of range for agent {agent!r}; "
-                    f"expected 0 <= action < {self.green_phase_count}."
+                    "expected 0 for hold or 1 for switch."
                 )
 
             current_action = self._current_actions.get(agent, 0)
             min_green_satisfied = self._elapsed_green_seconds.get(agent, 0.0) >= self.min_green_seconds
             switched = False
 
-            if requested_action != current_action and min_green_satisfied:
-                phase_index = self._tls_to_green_phases[agent][requested_action]
+            if requested_action == 1 and min_green_satisfied:
+                next_action = (current_action + 1) % self.green_phase_count
+                phase_index = self._tls_to_green_phases[agent][next_action]
                 traci.trafficlight.setPhase(agent, phase_index)
-                self._current_actions[agent] = requested_action
+                self._current_actions[agent] = next_action
                 self._elapsed_green_seconds[agent] = 0.0
                 switched = True
 
