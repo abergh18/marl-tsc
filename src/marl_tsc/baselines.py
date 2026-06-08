@@ -19,6 +19,7 @@ def fixed_time_actions(env: Any, step_index: int) -> dict[str, int]:
     if not agents:
         return {}
 
-    steps_per_phase = max(env.min_green_seconds // env.seconds_per_action, 1)
-    action = 1 if (step_index + 1) % steps_per_phase == 0 else 0
+    phase_seconds = max(30, env.min_green_seconds)
+    steps_per_phase = max(round(phase_seconds / env.seconds_per_action), 1)
+    action = 1 if step_index > 0 and step_index % steps_per_phase == 0 else 0
     return {agent: action for agent in agents}

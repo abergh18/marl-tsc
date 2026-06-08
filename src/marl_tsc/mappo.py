@@ -235,13 +235,13 @@ def train_mappo(
 
     actor = Actor(obs_dim, action_dim).to(device)
     critic = Critic(obs_dim * num_agents).to(device)
-    optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=3e-4)
+    optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=1e-4)
 
     gamma = 0.99
     gae_lambda = 0.95
-    clip_coef = 0.2
-    update_epochs = 10
-    entropy_coef = 0.001
+    clip_coef = 0.1
+    update_epochs = 5
+    entropy_coef = 0.01
     value_coef = 0.5
     local_reward_weight = 0.8
 
@@ -270,7 +270,7 @@ def train_mappo(
         # For MAPPO, we record:
         # - Local observations: Used by the shared Actor network for decentralized execution.
         # - Centralized observations: Concatenated views used by the Critic for centralized training.
-        # - Action masks: Ensures the Categorical distribution only samples valid green phases.
+        # - Action masks: Ensures the Categorical distribution only samples valid actions.
         # - Blended rewards: Mostly local reward, with a small global queue signal.
         while len(rollout_rewards) < rollout_steps and global_steps < total_timesteps:
             local_obs = _stack_agent_observations(observations, agent_ids)
@@ -354,8 +354,8 @@ def train_mappo(
         #Advantage normalisation
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        normalised_returns = (returns - value_norm.mean) / value_norm.std
         value_norm.update(returns)
+        normalised_returns = (returns - value_norm.mean) / value_norm.std
 
         # --- Batch Preparation & Normalization ---
         # Convert gathered trajectories into flattened PyTorch tensors. 
@@ -410,6 +410,7 @@ def train_mappo(
                 "timestep": global_steps,
                 "mean_training_reward": float(np.mean(rewards_array)),
                 "moving_avg_episode_return": float(np.mean(episode_returns)) if episode_returns else 0.0,
+                "episodes_completed": episode_index,
             }
         )
 
@@ -432,7 +433,7 @@ def train_mappo(
             "gamma": gamma,
             "gae_lambda": gae_lambda,
             "clip_coef": clip_coef,
-            "learning_rate": 3e-4,
+            "learning_rate": 1e-4,
             "update_epochs": update_epochs,
             "entropy_coef": entropy_coef,
             "value_coef": value_coef,

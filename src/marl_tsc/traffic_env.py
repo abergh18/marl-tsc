@@ -56,6 +56,10 @@ class SumoTrafficEnv(ParallelEnv):
         self._elapsed_green_seconds: dict[str, float] = {}
         self._switched_last_step: dict[str, bool] = {}
         self._latest_lane_queues: dict[str, list[int]] = {}
+        self._last_arrived_vehicles = 0
+        self._last_mean_waiting_time = 0.0
+        self._last_total_time_loss = 0.0
+        self._last_vehicle_count = 0
         self._sumo_running = False
 
         self._traci = None
@@ -193,6 +197,10 @@ class SumoTrafficEnv(ParallelEnv):
         self._elapsed_green_seconds = {}
         self._switched_last_step = {}
         self._latest_lane_queues = {}
+        self._last_arrived_vehicles = 0
+        self._last_mean_waiting_time = 0.0
+        self._last_total_time_loss = 0.0
+        self._last_vehicle_count = 0
 
         # Initialize mapping for each selected traffic light.
         for tls_id in selected_agents:
@@ -307,15 +315,16 @@ class SumoTrafficEnv(ParallelEnv):
         """Returns observations for all active agents."""
         return {agent: self._get_obs_for_agent(agent) for agent in self.agents}
 
-    def _local_queue_stats(self, agent: str) -> tuple[float, float]:
+    def _local_queue_stats(self, agent: str) -> tuple[float, float, float]:
         lane_queues = self._latest_lane_queues.get(agent, [])
 
         if not lane_queues:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
 
         local_queue = float(sum(lane_queues))
         mean_local_queue = float(np.mean(lane_queues))
-        return local_queue, mean_local_queue
+        max_local_queue = float(max(lane_queues))
+        return local_queue, mean_local_queue, max_local_queue
 
     def _reward_for_agent(self, agent: str) -> float:
         """Computes the reward for an agent based on local traffic metrics.
@@ -323,11 +332,11 @@ class SumoTrafficEnv(ParallelEnv):
         The default implementation penalizes high queue lengths and phase
         switches to encourage stability and flow.
         """
-        _, mean_local_queue = self._local_queue_stats(agent)
+        _, mean_local_queue, max_local_queue = self._local_queue_stats(agent)
         switched = self._switched_last_step.get(agent, False)
         penalty = self.switch_penalty if switched else 0.0
-        #return -float(np.max(lane_queues)) * 0.1
-        return (-mean_local_queue - penalty) * 0.1
+        queue_penalty = 0.8 * mean_local_queue + 0.2 * max_local_queue
+        return (-queue_penalty - penalty) * 0.1
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
@@ -378,10 +387,24 @@ class SumoTrafficEnv(ParallelEnv):
             self._elapsed_green_seconds[agent] = self._elapsed_green_seconds.get(agent, 0.0) + self.seconds_per_action
 
         # Perform the actual physics steps in SUMO.
+        arrived_vehicles = 0
         for _ in range(self.seconds_per_action):
             traci.simulationStep()
+            arrived_vehicles += int(traci.simulation.getArrivedNumber())
 
         self.step_count += 1
+        self._last_arrived_vehicles = arrived_vehicles
+
+        vehicle_ids = list(traci.vehicle.getIDList())
+        self._last_vehicle_count = len(vehicle_ids)
+        if vehicle_ids:
+            waiting_times = [traci.vehicle.getWaitingTime(vehicle_id) for vehicle_id in vehicle_ids]
+            time_losses = [traci.vehicle.getTimeLoss(vehicle_id) for vehicle_id in vehicle_ids]
+            self._last_mean_waiting_time = float(np.mean(waiting_times))
+            self._last_total_time_loss = float(sum(time_losses))
+        else:
+            self._last_mean_waiting_time = 0.0
+            self._last_total_time_loss = 0.0
 
         # Cache the latest lane queues once per step so observations, rewards,
         # and infos do not each re-query TraCI for the same values.
@@ -404,15 +427,20 @@ class SumoTrafficEnv(ParallelEnv):
 
         infos = {}
         for agent in self.agents:
-            local_queue, mean_local_queue = self._local_queue_stats(agent)
+            local_queue, mean_local_queue, max_local_queue = self._local_queue_stats(agent)
             current_action = self._current_actions.get(agent, 0)
             infos[agent] = {
                 "local_queue": local_queue,
                 "mean_local_queue": mean_local_queue,
+                "max_local_queue": max_local_queue,
                 "switched": self._switched_last_step.get(agent, False),
                 "current_action": current_action,
                 "min_green_satisfied": self._min_green_satisfied(agent),
                 "action_mask": self.action_mask(agent),
+                "arrived_vehicles": self._last_arrived_vehicles,
+                "vehicle_count": self._last_vehicle_count,
+                "mean_waiting_time": self._last_mean_waiting_time,
+                "total_time_loss": self._last_total_time_loss,
             }
 
         if truncated:

@@ -63,6 +63,7 @@ def _make_reward_logger_callback(algorithm_name: str):
             self.episode_returns = deque(maxlen=100)
             # Accumulator for returns across the vectorized environments
             self.current_returns = None
+            self.completed_episodes = 0
 
         def _on_step(self):
             rewards = self.locals.get("rewards")
@@ -91,6 +92,7 @@ def _make_reward_logger_callback(algorithm_name: str):
                         "timestep": int(self.num_timesteps),
                         "mean_training_reward": mean_reward,
                         "moving_avg_episode_return": float(np.mean(self.episode_returns)) if self.episode_returns else 0.0,
+                        "episodes_completed": self.completed_episodes,
                     }
                 )
             return True
@@ -126,7 +128,16 @@ def train_ppo(
 
     # Wrap the PettingZoo env for SB3
     vec_env = _make_vec_env(env)
-    model = PPO("MlpPolicy", vec_env, verbose=0, seed=seed, n_steps=256, batch_size=64)
+    model = PPO(
+        "MlpPolicy",
+        vec_env,
+        verbose=0,
+        seed=seed,
+        learning_rate=1e-4,
+        n_steps=512,
+        batch_size=128,
+        ent_coef=0.005,
+    )
 
     # Setup training monitoring
     reward_logger = _make_reward_logger_callback(algorithm)
@@ -205,8 +216,8 @@ def evaluate_policy(
     """
     Evaluates a policy over multiple episodes and returns performance metrics.
     
-    Collects total reward, average queue lengths across all controlled lanes, 
-    and the number of traffic light phase switches.
+    Collects reward, queue, switching, arrivals, waiting-time, and time-loss
+    metrics so policies cannot look good by optimizing only one queue average.
     """
 
     from marl_tsc.traffic_env import SumoTrafficEnv
@@ -214,7 +225,12 @@ def evaluate_policy(
     env_options = dict(env_kwargs or {})
     episode_rewards = []
     episode_queues = []
+    episode_max_queues = []
     episode_switches = []
+    episode_arrivals = []
+    episode_waiting_times = []
+    episode_time_losses = []
+    episode_vehicle_counts = []
     total_completed_steps = 0
 
     for episode_index in range(episodes):
@@ -230,7 +246,13 @@ def evaluate_policy(
         episode_reward = 0.0
         queue_sum = 0.0
         queue_count = 0
+        max_queue = 0.0
         switch_count = 0
+        arrived_vehicles = 0
+        waiting_time_sum = 0.0
+        time_loss_sum = 0.0
+        vehicle_count_sum = 0.0
+        global_metric_count = 0
         completed_steps = 0
 
         try:
@@ -246,7 +268,16 @@ def evaluate_policy(
                 for info in infos.values():
                     queue_sum += float(info.get("mean_local_queue", 0.0))
                     queue_count += 1
+                    max_queue = max(max_queue, float(info.get("max_local_queue", 0.0)))
                     switch_count += 1 if info.get("switched") else 0
+
+                first_info = next(iter(infos.values()), None)
+                if first_info:
+                    arrived_vehicles += int(first_info.get("arrived_vehicles", 0))
+                    waiting_time_sum += float(first_info.get("mean_waiting_time", 0.0))
+                    time_loss_sum += float(first_info.get("total_time_loss", 0.0))
+                    vehicle_count_sum += float(first_info.get("vehicle_count", 0.0))
+                    global_metric_count += 1
 
                 completed_steps += 1
                 if all(truncations.values()):
@@ -258,7 +289,12 @@ def evaluate_policy(
         print(f"Finished Evaluation Episode {episode_index + 1}/{episodes} - Total Reward: {episode_reward:.2f}")
         episode_rewards.append(episode_reward)
         episode_queues.append(queue_sum / queue_count if queue_count else 0.0)
+        episode_max_queues.append(max_queue)
         episode_switches.append(switch_count)
+        episode_arrivals.append(arrived_vehicles)
+        episode_waiting_times.append(waiting_time_sum / global_metric_count if global_metric_count else 0.0)
+        episode_time_losses.append(time_loss_sum / global_metric_count if global_metric_count else 0.0)
+        episode_vehicle_counts.append(vehicle_count_sum / global_metric_count if global_metric_count else 0.0)
         total_completed_steps += completed_steps
 
     return {
@@ -266,8 +302,13 @@ def evaluate_policy(
         "episodes": episodes,
         "mean_total_reward": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
         "mean_local_queue": float(np.mean(episode_queues)) if episode_queues else 0.0,
+        "mean_max_queue": float(np.mean(episode_max_queues)) if episode_max_queues else 0.0,
         "total_completed_steps": int(total_completed_steps),
         "mean_switches_per_episode": float(np.mean(episode_switches)) if episode_switches else 0.0,
+        "mean_arrived_vehicles_per_episode": float(np.mean(episode_arrivals)) if episode_arrivals else 0.0,
+        "mean_waiting_time": float(np.mean(episode_waiting_times)) if episode_waiting_times else 0.0,
+        "mean_total_time_loss": float(np.mean(episode_time_losses)) if episode_time_losses else 0.0,
+        "mean_vehicle_count": float(np.mean(episode_vehicle_counts)) if episode_vehicle_counts else 0.0,
     }
 
 
@@ -285,12 +326,23 @@ def plot_training_histories(histories):
 
     for algorithm, records in grouped.items():
         records = sorted(records, key=lambda item: item["timestep"])
-        timesteps = [item["timestep"] for item in records]
-        rewards = [item["mean_training_reward"] for item in records]
+        episode_records = [
+            item
+            for item in records
+            if float(item.get("moving_avg_episode_return", 0.0)) != 0.0
+        ]
+        if episode_records:
+            timesteps = [item["timestep"] for item in episode_records]
+            rewards = [item["moving_avg_episode_return"] for item in episode_records]
+            ylabel = "Moving average episode return"
+        else:
+            timesteps = [item["timestep"] for item in records]
+            rewards = [item["mean_training_reward"] for item in records]
+            ylabel = "Mean training reward"
         ax.plot(timesteps, rewards, label=algorithm.upper())
 
     ax.set_xlabel("Training timesteps")
-    ax.set_ylabel("Mean training reward")
+    ax.set_ylabel(ylabel if grouped else "Reward")
     ax.set_title("Training convergence")
     if grouped:
         ax.legend()
