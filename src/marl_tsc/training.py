@@ -126,7 +126,7 @@ def train_ppo(
 
     # Wrap the PettingZoo env for SB3
     vec_env = _make_vec_env(env)
-    model = PPO("MlpPolicy", vec_env, verbose=0, seed=seed, n_steps=1024, batch_size=256)
+    model = PPO("MlpPolicy", vec_env, verbose=0, seed=seed, n_steps=256, batch_size=64)
 
     # Setup training monitoring
     reward_logger = _make_reward_logger_callback(algorithm)

@@ -55,6 +55,7 @@ class SumoTrafficEnv(ParallelEnv):
         self._current_actions: dict[str, int] = {}
         self._elapsed_green_seconds: dict[str, float] = {}
         self._switched_last_step: dict[str, bool] = {}
+        self._latest_lane_queues: dict[str, list[int]] = {}
         self._sumo_running = False
 
         self._traci = None
@@ -191,6 +192,7 @@ class SumoTrafficEnv(ParallelEnv):
         self._current_actions = {}
         self._elapsed_green_seconds = {}
         self._switched_last_step = {}
+        self._latest_lane_queues = {}
 
         # Initialize mapping for each selected traffic light.
         for tls_id in selected_agents:
@@ -221,6 +223,7 @@ class SumoTrafficEnv(ParallelEnv):
             self._current_actions[tls_id] = 0
             self._elapsed_green_seconds[tls_id] = 0.0
             self._switched_last_step[tls_id] = False
+            self._latest_lane_queues[tls_id] = []
             traci.trafficlight.setPhase(tls_id, green_phases[0])
 
     def observation_space(self, agent: str) -> Box:
@@ -279,10 +282,14 @@ class SumoTrafficEnv(ParallelEnv):
         """
         traci = self._import_traci()
         lanes = self._tls_to_lanes.get(agent, [])
+        cached_queues = self._latest_lane_queues.get(agent)
 
         values = []
-        for lane_id in lanes[: self.max_lanes_per_tls]:
-            queue = traci.lane.getLastStepHaltingNumber(lane_id)
+        if cached_queues is None or len(cached_queues) != len(lanes[: self.max_lanes_per_tls]):
+            cached_queues = [traci.lane.getLastStepHaltingNumber(lane_id) for lane_id in lanes[: self.max_lanes_per_tls]]
+            self._latest_lane_queues[agent] = cached_queues
+
+        for queue in cached_queues[: self.max_lanes_per_tls]:
             values.append(min(queue / self.max_queue_value, 1.0))
 
         while len(values) < self.max_lanes_per_tls:
@@ -297,9 +304,7 @@ class SumoTrafficEnv(ParallelEnv):
         return {agent: self._get_obs_for_agent(agent) for agent in self.agents}
 
     def _local_queue_stats(self, agent: str) -> tuple[float, float]:
-        traci = self._import_traci()
-        lanes = self._tls_to_lanes.get(agent, [])
-        lane_queues = [traci.lane.getLastStepHaltingNumber(lane_id) for lane_id in lanes]
+        lane_queues = self._latest_lane_queues.get(agent, [])
 
         if not lane_queues:
             return 0.0, 0.0
@@ -372,6 +377,14 @@ class SumoTrafficEnv(ParallelEnv):
             traci.simulationStep()
 
         self.step_count += 1
+
+        # Cache the latest lane queues once per step so observations, rewards,
+        # and infos do not each re-query TraCI for the same values.
+        for agent in self.agents:
+            lanes = self._tls_to_lanes.get(agent, [])
+            self._latest_lane_queues[agent] = [
+                traci.lane.getLastStepHaltingNumber(lane_id) for lane_id in lanes[: self.max_lanes_per_tls]
+            ]
 
         observations = self._get_obs()
         rewards = {agent: self._reward_for_agent(agent) for agent in self.agents}

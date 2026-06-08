@@ -235,13 +235,13 @@ def train_mappo(
 
     actor = Actor(obs_dim, action_dim).to(device)
     critic = Critic(obs_dim * num_agents).to(device)
-    optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=2e-4)
+    optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=3e-4)
 
     gamma = 0.99
     gae_lambda = 0.95
     clip_coef = 0.2
     update_epochs = 10
-    entropy_coef = 0.1
+    entropy_coef = 0.001
     value_coef = 0.5
 
     value_norm = RunningMeanStd()
