@@ -190,6 +190,7 @@ def train_mappo(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     env_options = dict(env_kwargs or {})
+    env_options.setdefault("collect_global_metrics", False)
     env = SumoTrafficEnv(
         config_file,
         possible_agents=traffic_light_ids,
@@ -199,7 +200,7 @@ def train_mappo(
     )
 
     observations, infos = env.reset(seed=seed)
-    agent_ids = tuple(traffic_light_ids)
+    agent_ids = tuple(traffic_light_ids or env.agents)
     if not agent_ids:
         env.close()
         raise ValueError("traffic_light_ids must contain at least one agent.")
@@ -207,12 +208,20 @@ def train_mappo(
     obs_dim = int(np.asarray(observations[agent_ids[0]], dtype=np.float32).shape[0])
     action_dim = int(env.action_space(agent_ids[0]).n)
     num_agents = len(agent_ids)
-    hidden_size = 64
+    hidden_size = 128
     critic_hidden_size = 256
 
     class Actor(nn.Module):
-        def __init__(self, obs_size: int, action_size: int) -> None:
+        def __init__(
+            self,
+            obs_size: int,
+            action_size: int,
+            phase_queue_start: int | None = None,
+        ) -> None:
             super().__init__()
+            self.action_size = action_size
+            self.phase_queue_start = phase_queue_start
+            self.queue_logit_scale = nn.Parameter(torch.tensor(2.0))
             self.net = nn.Sequential(
                 nn.Linear(obs_size, hidden_size),
                 nn.ReLU(),
@@ -222,7 +231,13 @@ def train_mappo(
             )
 
         def forward(self, obs: torch.Tensor) -> torch.Tensor:
-            return self.net(obs)
+            logits = self.net(obs)
+            if self.phase_queue_start is not None:
+                phase_queues = obs[
+                    ..., self.phase_queue_start : self.phase_queue_start + self.action_size
+                ]
+                logits = logits + self.queue_logit_scale.clamp(0.0, 5.0) * phase_queues
+            return logits
 
     class Critic(nn.Module):
         def __init__(self, central_obs_size: int) -> None:
@@ -238,15 +253,23 @@ def train_mappo(
         def forward(self, central_obs: torch.Tensor) -> torch.Tensor:
             return self.net(central_obs)
 
-    actor = Actor(obs_dim, action_dim).to(device)
+    phase_queue_start = None
+    if (
+        env.phase_action_mode == "direct"
+        and env_options.get("include_phase_queue_features", True)
+    ):
+        phase_queue_start = int(env.max_lanes_per_tls) + 2
+
+    actor = Actor(obs_dim, action_dim, phase_queue_start=phase_queue_start).to(device)
     critic = Critic(obs_dim * num_agents).to(device)
-    optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=1e-4)
+    learning_rate = 3e-4
+    optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=learning_rate)
 
     gamma = 0.99
     gae_lambda = 0.95
-    clip_coef = 0.1
-    update_epochs = 5
-    entropy_coef = 0.01
+    clip_coef = 0.2
+    update_epochs = 8
+    entropy_coef = 0.005
     value_coef = 0.5
     local_reward_weight = 0.8
 
@@ -430,11 +453,12 @@ def train_mappo(
             "gamma": gamma,
             "gae_lambda": gae_lambda,
             "clip_coef": clip_coef,
-            "learning_rate": 1e-4,
+            "learning_rate": learning_rate,
             "update_epochs": update_epochs,
             "entropy_coef": entropy_coef,
             "value_coef": value_coef,
             "local_reward_weight": local_reward_weight,
+            "phase_queue_start": phase_queue_start,
             "env_kwargs": env_options,
         },
         device=str(device),

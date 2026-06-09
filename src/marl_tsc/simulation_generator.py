@@ -38,7 +38,10 @@ class SimulationGenerator:
         traffic_light_ids: Sequence[str] = DEFAULT_TRAFFIC_LIGHT_IDS,
         trip_begin: int = 0,
         trip_end: int = 1000,
-        trip_period: int = 2,
+        trip_period: float = 2,
+        trip_fringe_factor: str | float | None = None,
+        allow_fringe: bool = True,
+        random_depart: bool = True,
         seed: int = 42,
     ) -> None:
         """Create a SUMO grid network, traffic demand, routes, and config."""
@@ -56,6 +59,9 @@ class SimulationGenerator:
         self.trip_begin = trip_begin
         self.trip_end = trip_end
         self.trip_period = trip_period
+        self.trip_fringe_factor = trip_fringe_factor
+        self.allow_fringe = allow_fringe
+        self.random_depart = random_depart
         self.seed = seed
 
         sumo_home = os.environ.get("SUMO_HOME")
@@ -65,6 +71,51 @@ class SimulationGenerator:
             )
 
         self.random_trips_file = Path(sumo_home) / "tools" / "randomTrips.py"
+
+    def _random_trips_argv(
+        self,
+        *,
+        trip_fringe_factor: str | float | None,
+        allow_fringe: bool,
+    ) -> list[str]:
+        argv = [
+            str(self.random_trips_file),
+            "-n",
+            str(self.network_file),
+            "-o",
+            str(self.trips_file),
+            "-r",
+            str(self.routes_file),
+            "--begin",
+            str(self.trip_begin),
+            "--end",
+            str(self.trip_end),
+            "--period",
+            str(self.trip_period),
+            "--seed",
+            str(self.seed),
+        ]
+
+        if trip_fringe_factor not in (None, "", 1, "1", "1.0"):
+            argv.extend(["--fringe-factor", str(trip_fringe_factor)])
+            if allow_fringe:
+                argv.append("--allow-fringe")
+
+        if self.random_depart:
+            argv.append("--random-depart")
+
+        return argv
+
+    def _run_random_trips(self, argv: list[str]) -> None:
+        old_argv = sys.argv[:]
+        try:
+            sys.argv = argv
+            runpy.run_path(str(self.random_trips_file), run_name="__main__")
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                raise subprocess.CalledProcessError(int(exc.code), argv) from exc
+        finally:
+            sys.argv = old_argv
 
     @property
     def network_file(self) -> Path:
@@ -135,31 +186,21 @@ class SimulationGenerator:
         if tools_path not in sys.path:
             sys.path.insert(0, tools_path)
 
-        old_argv = sys.argv[:]
+        argv = self._random_trips_argv(
+            trip_fringe_factor=self.trip_fringe_factor,
+            allow_fringe=self.allow_fringe,
+        )
         try:
-            sys.argv = [
-                str(self.random_trips_file),
-                "-n",
-                str(self.network_file),
-                "-o",
-                str(self.trips_file),
-                "-r",
-                str(self.routes_file),
-                "--begin",
-                str(self.trip_begin),
-                "--end",
-                str(self.trip_end),
-                "--period",
-                str(self.trip_period),
-                "--seed",
-                str(self.seed),
-            ]
-            runpy.run_path(str(self.random_trips_file), run_name="__main__")
-        except SystemExit as exc:
-            if exc.code not in (0, None):
-                raise subprocess.CalledProcessError(int(exc.code), sys.argv) from exc
-        finally:
-            sys.argv = old_argv
+            self._run_random_trips(argv)
+        except subprocess.CalledProcessError:
+            fallback_argv = self._random_trips_argv(
+                trip_fringe_factor=None,
+                allow_fringe=False,
+            )
+            print(
+                "Fringe trip generation failed; falling back to random trips across all valid edges."
+            )
+            self._run_random_trips(fallback_argv)
 
         return self.routes_file
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+import random
 import numpy as np
 
 
@@ -103,6 +104,7 @@ def train_ppo(
     algorithm = "ppo"
 
     env_options = dict(env_kwargs or {})
+    env_options.setdefault("collect_global_metrics", False)
     env = SumoTrafficEnv(
         config_file,
         possible_agents=traffic_light_ids,
@@ -117,10 +119,10 @@ def train_ppo(
         vec_env,
         verbose=0,
         seed=seed,
-        learning_rate=1e-4,
-        n_steps=512,
-        batch_size=128,
-        ent_coef=0.005,
+        learning_rate=3e-4,
+        n_steps=1024,
+        batch_size=256,
+        ent_coef=0.01,
     )
 
     reward_logger = _make_reward_logger_callback(algorithm)
@@ -198,6 +200,7 @@ def evaluate_policy(
     from marl_tsc.traffic_env import SumoTrafficEnv
 
     env_options = dict(env_kwargs or {})
+    env_options.setdefault("global_metric_interval", 10)
     episode_rewards = []
     episode_queues = []
     episode_max_queues = []
@@ -209,6 +212,8 @@ def evaluate_policy(
     total_completed_steps = 0
 
     for episode_index in range(episodes):
+        random.seed(seed + episode_index)
+        np.random.seed(seed + episode_index)
         env = SumoTrafficEnv(
             config_file,
             possible_agents=traffic_light_ids,
@@ -248,10 +253,11 @@ def evaluate_policy(
                 first_info = next(iter(infos.values()), None)
                 if first_info:
                     arrived_vehicles += int(first_info.get("arrived_vehicles", 0))
-                    waiting_time_sum += float(first_info.get("mean_waiting_time", 0.0))
-                    time_loss_sum += float(first_info.get("total_time_loss", 0.0))
-                    vehicle_count_sum += float(first_info.get("vehicle_count", 0.0))
-                    global_metric_count += 1
+                    if first_info.get("global_metrics_updated", True):
+                        waiting_time_sum += float(first_info.get("mean_waiting_time", 0.0))
+                        time_loss_sum += float(first_info.get("total_time_loss", 0.0))
+                        vehicle_count_sum += float(first_info.get("vehicle_count", 0.0))
+                        global_metric_count += 1
 
                 completed_steps += 1
                 if all(truncations.values()):
