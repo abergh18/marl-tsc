@@ -121,12 +121,25 @@ def generate_scenarios(num_locations=None):
         
         # Try to process the location, catching any errors that happen
         try:
-            # Find the latitude and longitude for the centre of the location
-            lat, lon = ox.geocode(location)
+            # Find centre of location
+            centre_lat, centre_lon = ox.geocode(location)
+
+            # Get all roads within 3km of centre
+            G = ox.graph_from_point(
+                    (centre_lat, centre_lon),
+                    dist=3000,
+                    network_type="drive"
+                )
+
+            # Randomly select a node from the graph to be the centre of the map
+            node = random.choice(list(G.nodes))
+
+            # Get the latitude and longitude of the selected node
+            lat = G.nodes[node]["y"]
+            lon = G.nodes[node]["x"]
             
-            # Pick a random radius size to make the maps slightly different sizes
+            # Pick a random radius to make maps different sizes
             radius = random.randint(350, 550)
-            print(f"Radius: {radius}m")
 
             # Create the text query to ask the server for all the driving roads in that area
             query = f"""[out:xml];
