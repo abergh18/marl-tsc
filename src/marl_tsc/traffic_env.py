@@ -112,25 +112,39 @@ class SumoTrafficEnv(ParallelEnv):
         )
         self._sumo_running = True
 
+    def _selected_agents(self, discovered_agents: Sequence[str]) -> list[str]:
+        """Return requested traffic lights, or all discovered lights if none were requested."""
+        discovered_agents = list(dict.fromkeys(discovered_agents))
+        if not discovered_agents:
+            raise ValueError("No SUMO traffic lights were discovered.")
+
+        if not self.requested_agents:
+            return discovered_agents
+
+        missing_agents = [
+            agent_id for agent_id in self.requested_agents if agent_id not in discovered_agents
+        ]
+        if missing_agents:
+            missing = ", ".join(repr(agent_id) for agent_id in missing_agents)
+            raise ValueError(f"Requested traffic lights are missing from SUMO: {missing}")
+
+        return self.requested_agents.copy()
+
+    @staticmethod
+    def _green_phase_indexes(phases) -> list[int]:
+        green_phases = []
+        for phase_index, phase in enumerate(phases):
+            state = getattr(phase, "state", "").lower()
+            if "g" in state and "y" not in state:
+                green_phases.append(phase_index)
+        return green_phases
+
     def _probe_network_structure(self) -> None:
         """Briefly start SUMO to size spaces to the network's real configuration."""
         traci = self._import_traci()
         self._start_sumo(seed=self.seed)
         try:
-            discovered = list(dict.fromkeys(traci.trafficlight.getIDList()))
-            if not discovered:
-                raise ValueError("No SUMO traffic lights were discovered during probe.")
-
-            if self.requested_agents:
-                missing = [a for a in self.requested_agents if a not in discovered]
-                if missing:
-                    raise ValueError(
-                        "Requested traffic lights are missing from SUMO: "
-                        + ", ".join(repr(a) for a in missing)
-                    )
-                target_ids = self.requested_agents
-            else:
-                target_ids = discovered
+            target_ids = self._selected_agents(traci.trafficlight.getIDList())
 
             max_lanes = 0
             detected_phase_counts = set()
@@ -142,51 +156,22 @@ class SumoTrafficEnv(ParallelEnv):
                 if self.green_phase_count is None:
                     logics = traci.trafficlight.getAllProgramLogics(tls_id)
                     if logics:
-                        green_phases = []
-                        for phase in logics[0].phases:
-                            state = getattr(phase, "state", "").lower()
-                            # Identify phases that are "green" but not "yellow"
-                            if "g" in state and "y" not in state:
-                                green_phases.append(phase)
-                        detected_phase_counts.add(len(green_phases))
+                        detected_phase_counts.add(len(self._green_phase_indexes(logics[0].phases)))
 
             if self.max_lanes_per_tls is None:
                 self.max_lanes_per_tls = max(max_lanes, 1)
 
             if self.green_phase_count is None:
-                # Default to the most common configuration found, or fallback to 4
                 self.green_phase_count = max(detected_phase_counts) if detected_phase_counts else 4
         finally:
             traci.close()
             self._sumo_running = False
 
     def _discover_agents_and_lanes(self) -> None:
-        """Discover traffic lights and their controlled lanes after a simulation start.
-
-        This syncs the environment state with the active SUMO simulation, identifying
-        the lanes to monitor and the green phases available for each traffic light.
-        """
+        """Discover traffic lights, lanes, and green phases after SUMO starts."""
         traci = self._import_traci()
 
-        discovered_agents = list(dict.fromkeys(traci.trafficlight.getIDList()))
-        if not discovered_agents:
-            raise ValueError("No SUMO traffic lights were discovered.")
-
-        # Filter discovered agents based on the requested list if provided.
-        if self.requested_agents:
-            missing_agents = [
-                agent_id for agent_id in self.requested_agents if agent_id not in discovered_agents
-            ]
-            if missing_agents:
-                raise ValueError(
-                    "Requested traffic lights are missing from SUMO: "
-                    + ", ".join(repr(agent_id) for agent_id in missing_agents)
-                )
-            selected_agents = [
-                agent_id for agent_id in self.requested_agents if agent_id in discovered_agents
-            ]
-        else:
-            selected_agents = discovered_agents
+        selected_agents = self._selected_agents(traci.trafficlight.getIDList())
 
         self.possible_agents = selected_agents.copy()
         self.agents = selected_agents.copy()
@@ -202,7 +187,6 @@ class SumoTrafficEnv(ParallelEnv):
         self._last_total_time_loss = 0.0
         self._last_vehicle_count = 0
 
-        # Initialize mapping for each selected traffic light.
         for tls_id in selected_agents:
             controlled_lanes = list(dict.fromkeys(traci.trafficlight.getControlledLanes(tls_id)))
             self._tls_to_lanes[tls_id] = controlled_lanes[: self.max_lanes_per_tls]
@@ -211,16 +195,9 @@ class SumoTrafficEnv(ParallelEnv):
             if not program_logics:
                 raise ValueError(f"Traffic light {tls_id!r} has no program logic in SUMO.")
 
-            # Parse the traffic light program to identify green phases.
             program = program_logics[0]
-            green_phases = []
-            for phase_index, phase in enumerate(program.phases):
-                state = getattr(phase, "state", "")
-                state_lower = state.lower()
-                if "g" in state_lower and "y" not in state_lower:
-                    green_phases.append(phase_index)
+            green_phases = self._green_phase_indexes(program.phases)
 
-            # Action space validation: ensure SUMO program matches RL agent config.
             if len(green_phases) != self.green_phase_count:
                 raise ValueError(
                     f"Traffic light {tls_id!r} has {len(green_phases)} green phases; "
@@ -295,12 +272,15 @@ class SumoTrafficEnv(ParallelEnv):
         traci = self._import_traci()
         lanes = self._tls_to_lanes.get(agent, [])
         cached_queues = self._latest_lane_queues.get(agent)
+        lane_ids = lanes[: self.max_lanes_per_tls]
 
-        values = []
-        if cached_queues is None or len(cached_queues) != len(lanes[: self.max_lanes_per_tls]):
-            cached_queues = [traci.lane.getLastStepHaltingNumber(lane_id) for lane_id in lanes[: self.max_lanes_per_tls]]
+        if cached_queues is None or len(cached_queues) != len(lane_ids):
+            cached_queues = [
+                traci.lane.getLastStepHaltingNumber(lane_id) for lane_id in lane_ids
+            ]
             self._latest_lane_queues[agent] = cached_queues
 
+        values = []
         for queue in cached_queues[: self.max_lanes_per_tls]:
             values.append(min(queue / self.max_queue_value, 1.0))
 
@@ -369,7 +349,8 @@ class SumoTrafficEnv(ParallelEnv):
                 )
 
             current_action = self._current_actions.get(agent, 0)
-            min_green_satisfied = self._elapsed_green_seconds.get(agent, 0.0) >= self.min_green_seconds
+            elapsed_green = self._elapsed_green_seconds.get(agent, 0.0)
+            min_green_satisfied = elapsed_green >= self.min_green_seconds
             switched = False
 
             if requested_action == 1 and min_green_satisfied:
@@ -384,7 +365,8 @@ class SumoTrafficEnv(ParallelEnv):
             self._switched_last_step[agent] = switched
 
         for agent in self.agents:
-            self._elapsed_green_seconds[agent] = self._elapsed_green_seconds.get(agent, 0.0) + self.seconds_per_action
+            elapsed_green = self._elapsed_green_seconds.get(agent, 0.0)
+            self._elapsed_green_seconds[agent] = elapsed_green + self.seconds_per_action
 
         # Perform the actual physics steps in SUMO.
         arrived_vehicles = 0
@@ -398,7 +380,9 @@ class SumoTrafficEnv(ParallelEnv):
         vehicle_ids = list(traci.vehicle.getIDList())
         self._last_vehicle_count = len(vehicle_ids)
         if vehicle_ids:
-            waiting_times = [traci.vehicle.getWaitingTime(vehicle_id) for vehicle_id in vehicle_ids]
+            waiting_times = [
+                traci.vehicle.getWaitingTime(vehicle_id) for vehicle_id in vehicle_ids
+            ]
             time_losses = [traci.vehicle.getTimeLoss(vehicle_id) for vehicle_id in vehicle_ids]
             self._last_mean_waiting_time = float(np.mean(waiting_times))
             self._last_total_time_loss = float(sum(time_losses))
@@ -410,8 +394,9 @@ class SumoTrafficEnv(ParallelEnv):
         # and infos do not each re-query TraCI for the same values.
         for agent in self.agents:
             lanes = self._tls_to_lanes.get(agent, [])
+            lane_ids = lanes[: self.max_lanes_per_tls]
             self._latest_lane_queues[agent] = [
-                traci.lane.getLastStepHaltingNumber(lane_id) for lane_id in lanes[: self.max_lanes_per_tls]
+                traci.lane.getLastStepHaltingNumber(lane_id) for lane_id in lane_ids
             ]
 
         observations = self._get_obs()

@@ -108,12 +108,13 @@ class SimulationGenerator:
             "--grid",
             f"--grid.number={self.grid_number}",
             f"--default.lanenumber={self.lane_number}",
-            "--tls.layout", "incoming",
+            "--tls.layout",
+            "incoming",
+            "--tls.set",
+            ",".join(self.traffic_light_ids),
             "-o",
             str(self.network_file),
         ]
-
-        command.extend(["--tls.set", ",".join(self.traffic_light_ids)])
 
         self.run_command(command)
         return self.network_file
