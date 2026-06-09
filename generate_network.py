@@ -66,27 +66,54 @@ def build_sumo_network(osm_path: str, net_path: str):
 
 
 # Define a function to loop through locations and generate maps for each
-def batch_generate_uk_scenarios():
+def generate_scenarios(num_locations=None):
     # Set the folder path where the generated files will be saved
     save_location = r"C:\Users\thoma\OneDrive - UWE Bristol\Group Project\Scenarios"
 
-    # Create a list of UK locations that have different types of road layouts
-    location_pool = [
-        "Stoke Gifford, UK",     # Suburban roads
-        "Milton Keynes, UK",     # Modern grid and roundabouts
-        "Bath, UK",              # Compact, historic streets
-        "York, UK",              # High-density irregular junctions
-        "Coventry, UK",          # Radial post-war ring roads
-        "Lincoln, UK"            # Mixture of steep inclines and old layouts
+    locations = [
+        "London, UK", "Birmingham, UK", "Manchester, UK", "Glasgow, UK",
+        "Newcastle, UK", "Sheffield, UK", "Liverpool, UK", "Leeds, UK",
+        "Bristol, UK", "Belfast, UK", "Edinburgh, UK", "Leicester, UK",
+        "Coventry, UK", "Bradford, UK", "Cardiff, UK", "Nottingham, UK",
+        "Kingston upon Hull, UK", "Stoke-on-Trent, UK", "Wolverhampton, UK",
+        "Plymouth, UK", "Derby, UK", "Southampton, UK", "Reading, UK",
+        "Swansea, UK", "Aberdeen, UK", "Preston, UK", "Sunderland, UK",
+        "Norwich, UK", "Chester, UK", "Carlisle, UK", "Exeter, UK",
+        "Gloucester, UK", "Worcester, UK", "York, UK", "Lancaster, UK",
+        "Newport, UK", "Dundee, UK", "Portsmouth, UK", "Oxford, UK",
+        "Cambridge, UK", "Bath, UK", "Milton Keynes, UK", "Lincoln, UK",
+        "Durham, UK", "Canterbury, UK", "St Albans, UK", "Winchester, UK",
+        "Salisbury, UK", "Lichfield, UK", "Hereford, UK", "Stirling, UK",
+        "Inverness, UK", "Truro, UK", "Ely, UK", "Ripon, UK",
+        "Brighton, UK", "Bournemouth, UK", "Middlesbrough, UK", "Blackpool, UK",
+        "Bolton, UK", "Stockport, UK", "Slough, UK", "Watford, UK",
+        "Rotherham, UK", "Cheltenham, UK", "Chelmsford, UK", "Colchester, UK",
+        "Ipswich, UK", "Peterborough, UK", "Northampton, UK", "Luton, UK",
+        "Swindon, UK", "Southend-on-Sea, UK", "Telford, UK", "Shrewsbury, UK",
+        "Guildford, UK", "Basingstoke, UK", "Eastbourne, UK", "Hastings, UK",
+        "Dover, UK", "Perth, UK", "Dunfermline, UK", "Paisley, UK",
+        "East Kilbride, UK", "Ayr, UK", "Dumfries, UK", "Wrexham, UK",
+        "Bangor, UK", "Carmarthen, UK", "Merthyr Tydfil, UK", "Derry, UK",
+        "Lisburn, UK", "Newry, UK", "Coleraine, UK", "Ballymena, UK",
+        "Taunton, UK", "Weymouth, UK", "Torquay, UK", "Harrogate, UK",
+        "Halifax, UK",
     ]
 
+    # If a number is supplied, randomly select that many locations
+    if num_locations is not None:
+        if num_locations > len(locations):
+            raise ValueError(
+                f"Requested {num_locations} locations but only {len(locations)} are available."
+            )
+
+        locations = random.sample(locations, num_locations)
     # Set the web address for the server that provides the map data
     overpass_url = "https://overpass-api.de/api/interpreter"
     # Set a user agent so the server knows what program is asking for the data
     headers = {"User-Agent": "MARL-Heterogeneous-Generator/1.0"}
 
     # Loop through each location in the list
-    for idx, location in enumerate(location_pool):
+    for idx, location in enumerate(locations):
         print(f"\nLocation: {location}")
         
         # Create a simple file name based on the location
@@ -136,4 +163,4 @@ def batch_generate_uk_scenarios():
 # Check if the script is being run directly
 if __name__ == "__main__":
     # Start the batch generation process
-    batch_generate_uk_scenarios()
+    generate_scenarios()
