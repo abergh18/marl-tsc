@@ -10,6 +10,7 @@ from torch_geometric.data import Data
 from marl_tsc.traffic_env import SumoTrafficEnv
 
 from .graph_builder import GraphBuilder
+from .graph_types import GraphObservation
 
 
 class GraphTrafficEnv:
@@ -52,9 +53,12 @@ class GraphTrafficEnv:
             dtype=torch.float32,
         )
 
-        return Data(
+        return GraphObservation(
+          graph=Data(
             x=x,
             edge_index=self.topology.edge_index,
+          ),
+          agent_ids=self.agent_ids
         )
 
     def reset(self, *args, **kwargs):

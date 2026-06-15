@@ -31,7 +31,9 @@ class GATEncoder(BaseGraphEncoder):
             concat=False,
         )
 
-    def forward(self, graph):
+    def forward(self, graph_observation):
+
+        graph = graph_observation.graph
 
         x = self.gat1(
             graph.x,
