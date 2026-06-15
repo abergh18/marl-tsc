@@ -39,6 +39,8 @@ class Transition:
 
     action_dict: dict
 
+    log_prob: torch.Tensor
+
     logits: torch.Tensor
 
     value: torch.Tensor
@@ -82,6 +84,10 @@ class GraphRunner:
 
             actions = dist.sample()
 
+            log_probs = dist.log_prob(
+              actions
+            )
+
             action_dict = {
                 agent_id: int(action)
                 for agent_id, action in zip(
@@ -110,6 +116,7 @@ class GraphRunner:
                 Transition(
                     observation=graph_obs,
                     action_dict=action_dict,
+                    log_prob=log_probs.detach(),
                     logits=policy_output.logits.detach(),
                     value=policy_output.value.detach(),
                     reward_dict=rewards,
