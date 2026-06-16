@@ -41,7 +41,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
       policy,
       optimizer,
       rollout_steps=64,
-      gamma=0.99,
+      #gamma=0.99,
       gae_lambda=0.95,
   ):
 
@@ -50,7 +50,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
         policy=policy,
         optimizer=optimizer,
         rollout_steps=rollout_steps,
-        gamma=gamma,
+        #gamma=gamma,
         gae_lambda=gae_lambda,
     )
 
