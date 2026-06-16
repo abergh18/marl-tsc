@@ -31,52 +31,37 @@ import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from .graph_runner import GraphRunner
-from .graph_rollout import GraphRollout
-from .advantage_estimator import AdvantageEstimator
+from .base_trainer import BaseGraphTrainer
 
+class GraphCTDETrainer(BaseGraphTrainer):
 
-class GraphCTDETrainer:
+  def __init__(
+      self,
+      env,
+      policy,
+      optimizer,
+      rollout_steps=64,
+      gamma=0.99,
+      gae_lambda=0.95,
+  ):
 
-    def __init__(
-        self,
-        env,
-        policy,
-        optimizer,
-        rollout_steps: int = 64,
-    ):
-        self.env = env
-        self.policy = policy
-        self.optimizer = optimizer
-        self.rollout_steps = rollout_steps
+    super().__init__(
+        env=env,
+        policy=policy,
+        optimizer=optimizer,
+        rollout_steps=rollout_steps,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+    )
 
-    def train_step(self):
+    def update(
+      self,
+      rollout_batch,
+      advantage_batch
+      ):
 
-        # -----------------------------
-        # Collect rollout
-        # -----------------------------
-
-        runner = GraphRunner(
-            env=self.env,
-            policy=self.policy,
-        )
-
-        rollout = runner.collect_rollout(
-            num_steps=self.rollout_steps,
-        )
-
-        batch = GraphRollout.from_transitions(
-            rollout,
-            self.env.agent_ids,
-        )
-
-        adv_batch = (
-            AdvantageEstimator
-            .compute_gae(batch)
-        )
-
-        advantages = adv_batch.advantages
-        returns = adv_batch.returns
+        advantages = advantage_batch.advantages
+        returns = advantage_batch.returns
 
         advantages = (
             advantages
@@ -95,7 +80,7 @@ class GraphCTDETrainer:
         critic_losses = []
 
         for t, graph_obs in enumerate(
-            batch.observations
+            rollout_batch.observations
         ):
 
             output = self.policy(
@@ -106,7 +91,7 @@ class GraphCTDETrainer:
                 logits=output.logits
             )
 
-            actions = batch.actions[t]
+            actions = rollout_batch.actions[t]
 
             log_probs = dist.log_prob(
                 actions
@@ -168,6 +153,6 @@ class GraphCTDETrainer:
                 total_loss.detach()
             ),
             "rollout_length": len(
-                rollout
+                rollout_batch.observations
             ),
         }
