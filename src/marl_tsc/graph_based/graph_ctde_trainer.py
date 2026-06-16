@@ -54,105 +54,105 @@ class GraphCTDETrainer(BaseGraphTrainer):
         gae_lambda=gae_lambda,
     )
 
-    def update(
-      self,
-      rollout_batch,
-      advantage_batch
+  def update(
+    self,
+    rollout_batch,
+    advantage_batch
+    ):
+
+      advantages = advantage_batch.advantages
+      returns = advantage_batch.returns
+
+      advantages = (
+          advantages
+          - advantages.mean()
+      ) / (
+          advantages.std()
+          + 1e-8
+      )
+
+      # -----------------------------
+      # Replay observations through
+      # current network
+      # -----------------------------
+
+      actor_losses = []
+      critic_losses = []
+
+      for t, graph_obs in enumerate(
+          rollout_batch.observations
       ):
 
-        advantages = advantage_batch.advantages
-        returns = advantage_batch.returns
+          output = self.policy(
+              graph_obs
+          )
 
-        advantages = (
-            advantages
-            - advantages.mean()
-        ) / (
-            advantages.std()
-            + 1e-8
-        )
+          dist = Categorical(
+              logits=output.logits
+          )
 
-        # -----------------------------
-        # Replay observations through
-        # current network
-        # -----------------------------
+          actions = rollout_batch.actions[t]
 
-        actor_losses = []
-        critic_losses = []
+          log_probs = dist.log_prob(
+              actions
+          )
 
-        for t, graph_obs in enumerate(
-            rollout_batch.observations
-        ):
+          #
+          # Actor
+          #
 
-            output = self.policy(
-                graph_obs
-            )
+          actor_loss = -(
+              log_probs.sum()
+              * advantages[t].detach()
+          )
 
-            dist = Categorical(
-                logits=output.logits
-            )
+          #
+          # Critic
+          #
 
-            actions = rollout_batch.actions[t]
+          critic_loss = F.mse_loss(
+              output.value.squeeze(),
+              returns[t].detach(),
+          )
 
-            log_probs = dist.log_prob(
-                actions
-            )
+          actor_losses.append(
+              actor_loss
+          )
 
-            #
-            # Actor
-            #
+          critic_losses.append(
+              critic_loss
+          )
 
-            actor_loss = -(
-                log_probs.sum()
-                * advantages[t].detach()
-            )
+      actor_loss = torch.stack(
+          actor_losses
+      ).mean()
 
-            #
-            # Critic
-            #
+      critic_loss = torch.stack(
+          critic_losses
+      ).mean()
 
-            critic_loss = F.mse_loss(
-                output.value.squeeze(),
-                returns[t].detach(),
-            )
+      total_loss = (
+          actor_loss
+          + critic_loss
+      )
 
-            actor_losses.append(
-                actor_loss
-            )
+      self.optimizer.zero_grad()
 
-            critic_losses.append(
-                critic_loss
-            )
+      total_loss.backward()
 
-        actor_loss = torch.stack(
-            actor_losses
-        ).mean()
+      self.optimizer.step()
 
-        critic_loss = torch.stack(
-            critic_losses
-        ).mean()
-
-        total_loss = (
-            actor_loss
-            + critic_loss
-        )
-
-        self.optimizer.zero_grad()
-
-        total_loss.backward()
-
-        self.optimizer.step()
-
-        return {
-            "actor_loss": float(
-                actor_loss.detach()
-            ),
-            "critic_loss": float(
-                critic_loss.detach()
-            ),
-            "total_loss": float(
-                total_loss.detach()
-            ),
-            "rollout_length": len(
-                rollout_batch.observations
-            ),
-        }
+      return {
+          "actor_loss": float(
+              actor_loss.detach()
+          ),
+          "critic_loss": float(
+              critic_loss.detach()
+          ),
+          "total_loss": float(
+              total_loss.detach()
+          ),
+          "rollout_length": len(
+              rollout_batch.observations
+          ),
+      }
