@@ -108,9 +108,9 @@ class GraphTrafficEnv:
 
     @property
     def observation_dim(self):
-        graph, _ = self.reset()
-        return graph.x.shape[1]
+        graph_obs, _ = self.reset()
+        return graph_obs.graph.x.shape[1]
 
     @property
     def obs_dim(self):
-      return self.reset()[0].x.shape[1]
+      return self.reset()[0].graph.x.shape[1]
