@@ -78,6 +78,14 @@ class GraphCTDETrainer:
         advantages = adv_batch.advantages
         returns = adv_batch.returns
 
+        advantages = (
+            advantages
+            - advantages.mean()
+        ) / (
+            advantages.std()
+            + 1e-8
+        )
+
         # -----------------------------
         # Replay observations through
         # current network
