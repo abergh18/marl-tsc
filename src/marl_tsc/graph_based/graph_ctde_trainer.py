@@ -53,7 +53,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
         #gamma=gamma,
         gae_lambda=gae_lambda,
     )
-
+  
   def update(
     self,
     rollout_batch,
@@ -135,6 +135,9 @@ class GraphCTDETrainer(BaseGraphTrainer):
           actor_loss
           + critic_loss
       )
+      mean_reward = float(
+      rollout_batch.rewards.mean()
+      )
 
       self.optimizer.zero_grad()
 
@@ -142,7 +145,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
       self.optimizer.step()
 
-      return {
+      result = {
           "actor_loss": float(
               actor_loss.detach()
           ),
@@ -155,4 +158,11 @@ class GraphCTDETrainer(BaseGraphTrainer):
           "rollout_length": len(
               rollout_batch.observations
           ),
+          "mean_training_reward": float(
+              rollout_batch.rewards.mean()
+          ),
       }
+
+      print("UPDATE RETURN:", result)
+
+      return result
