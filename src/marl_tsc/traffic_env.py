@@ -35,14 +35,11 @@ class SumoTrafficEnv(ParallelEnv):
         global_metric_interval: int = 1,
         include_phase_queue_features: bool = True,
         include_action_mask_features: bool = True,
-        phase_action_mode: str = "direct",
     ) -> None:
         if green_phase_count is not None and green_phase_count < 1:
             raise ValueError("green_phase_count must be at least 1.")
         if global_metric_interval < 1:
             raise ValueError("global_metric_interval must be at least 1.")
-        if phase_action_mode not in {"cycle", "direct"}:
-            raise ValueError("phase_action_mode must be either 'cycle' or 'direct'.")
 
         self.config_file = Path(config_file)
         self.max_steps = max_steps
@@ -58,7 +55,6 @@ class SumoTrafficEnv(ParallelEnv):
         self.global_metric_interval = global_metric_interval
         self.include_phase_queue_features = include_phase_queue_features
         self.include_action_mask_features = include_action_mask_features
-        self.phase_action_mode = phase_action_mode
 
         self.step_count = 0
         self.requested_agents = list(dict.fromkeys(possible_agents)) if possible_agents else None
@@ -246,7 +242,7 @@ class SumoTrafficEnv(ParallelEnv):
     def observation_space(self, agent: str) -> Box:
         """Returns the observation space for a specific agent."""
         phase_feature_count = self.green_phase_count if self.include_phase_queue_features else 0
-        mask_feature_count = self._action_count() if self.include_action_mask_features else 0
+        mask_feature_count = self.green_phase_count if self.include_action_mask_features else 0
         return Box(
             low=0.0,
             high=1.0,
@@ -254,19 +250,12 @@ class SumoTrafficEnv(ParallelEnv):
             dtype=np.float32,
         )
 
-    def _action_count(self) -> int:
-        if self.phase_action_mode == "direct":
-            return self.green_phase_count
-        return 2
-
     def action_space(self, agent: str) -> Discrete:
         """Returns the action space for a specific agent.
 
-        In direct mode, actions select one of the traffic light's green phases.
-        In cycle mode, action 0 holds and action 1 advances to the next green
-        phase when min-green is satisfied.
+        Actions select one of the traffic light's green phases.
         """
-        return Discrete(self._action_count())
+        return Discrete(self.green_phase_count)
 
     def _current_phase_normalized(self, agent: str) -> float:
         current_action = self._current_actions.get(agent, 0)
@@ -296,21 +285,15 @@ class SumoTrafficEnv(ParallelEnv):
         junctions have different numbers of phases, higher invalid phase ids
         remain masked out for that junction.
         """
-        mask = np.zeros(self._action_count(), dtype=np.float32)
-        min_green_satisfied = (
-            self.green_phase_count > 1
-            and self._elapsed_green_seconds.get(agent, 0.0) >= self.min_green_seconds
-        )
-        if self.phase_action_mode == "direct":
-            current_action = self._current_actions.get(agent, 0)
-            mask[current_action] = 1.0
-            if min_green_satisfied:
-                valid_phase_count = len(self._tls_to_green_phases.get(agent, []))
-                mask[:valid_phase_count] = 1.0
-        else:
-            mask[0] = 1.0
-            if min_green_satisfied:
-                mask[1] = 1.0
+        mask = np.zeros(self.green_phase_count, dtype=np.float32)
+
+        current_action = self._current_actions.get(agent, 0)
+        mask[current_action] = 1.0
+
+        if self._elapsed_green_seconds.get(agent, 0.0) >= self.min_green_seconds:
+            valid_phase_count = len(self._tls_to_green_phases.get(agent, []))
+            mask[:valid_phase_count] = 1.0
+
         return mask
 
     def _phase_queue_totals(self, agent: str) -> list[float]:
@@ -420,10 +403,10 @@ class SumoTrafficEnv(ParallelEnv):
                 continue
 
             requested_action = int(actions[agent])
-            if requested_action < 0 or requested_action >= self._action_count():
+            if requested_action < 0 or requested_action >= self.green_phase_count:
                 raise ValueError(
                     f"Action {requested_action} is out of range for agent {agent!r}; "
-                    f"expected an action from 0 to {self._action_count() - 1}."
+                    f"expected an action from 0 to {self.green_phase_count - 1}."
                 )
 
             current_action = self._current_actions.get(agent, 0)
@@ -431,17 +414,13 @@ class SumoTrafficEnv(ParallelEnv):
             min_green_satisfied = elapsed_green >= self.min_green_seconds
             switched = False
 
-            if self.phase_action_mode == "direct":
-                target_action = requested_action
-                valid_phase_count = len(self._tls_to_green_phases.get(agent, []))
-                should_switch = (
-                    target_action < valid_phase_count
-                    and target_action != current_action
-                    and min_green_satisfied
-                )
-            else:
-                target_action = (current_action + 1) % self.green_phase_count
-                should_switch = requested_action == 1 and min_green_satisfied
+            target_action = requested_action
+            valid_phase_count = len(self._tls_to_green_phases.get(agent, []))
+            should_switch = (
+                target_action < valid_phase_count
+                and target_action != current_action
+                and min_green_satisfied
+            )
 
             if should_switch:
                 phase_index = self._tls_to_green_phases[agent][target_action]

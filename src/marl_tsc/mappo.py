@@ -1,5 +1,3 @@
-"""Minimal educational MAPPO trainer for the traffic signal project."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -254,10 +252,7 @@ def train_mappo(
             return self.net(central_obs)
 
     phase_queue_start = None
-    if (
-        env.phase_action_mode == "direct"
-        and env_options.get("include_phase_queue_features", True)
-    ):
+    if env_options.get("include_phase_queue_features", True):
         phase_queue_start = int(env.max_lanes_per_tls) + 2
 
     actor = Actor(obs_dim, action_dim, phase_queue_start=phase_queue_start).to(device)
