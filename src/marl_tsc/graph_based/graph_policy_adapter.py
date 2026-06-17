@@ -14,9 +14,11 @@ class GraphPolicyAdapter:
         self,
         graph_policy,
         topology,
+        policy_name = None,
     ):
         self.policy = graph_policy
         self.topology = topology
+        self.policy_name = policy_name
 
     @torch.no_grad()
     def act(
