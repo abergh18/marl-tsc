@@ -1,5 +1,3 @@
-"""Minimal educational MAPPO trainer for the traffic signal project."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,8 +7,12 @@ from typing import Any
 import numpy as np
 
 
-def _stack_agent_observations(observations: dict[str, np.ndarray], agent_ids: tuple[str, ...]) -> np.ndarray:
-    return np.stack([np.asarray(observations[agent], dtype=np.float32) for agent in agent_ids], axis=0)
+def _stack_agent_observations(
+    observations: dict[str, np.ndarray],
+    agent_ids: tuple[str, ...],
+) -> np.ndarray:
+    rows = [np.asarray(observations[agent], dtype=np.float32) for agent in agent_ids]
+    return np.stack(rows, axis=0)
 
 
 def _stack_agent_masks(
@@ -44,8 +46,8 @@ def _mask_logits(logits, mask):
 class RunningMeanStd:
     """Welford-style running statistics over a stream of scalar values.
 
-    Used to normalise critic targets so the value head only ever sees roughly
-    zero-mean, unit-variance returns; predictions are denormalised when fed
+    Used to normalize critic targets so the value head only ever sees roughly
+    zero-mean, unit-variance returns; predictions are denormalized when fed
     back into GAE so advantages keep their real-world scale.
     """
 
@@ -75,7 +77,7 @@ class RunningMeanStd:
         return float(np.sqrt(max(self.var, 1e-8)))
 
 
-def _compute_gae( # GAE: Generalized Advantage Estimation
+def _compute_gae(
     rewards: np.ndarray,
     values: np.ndarray,
     dones: np.ndarray,
@@ -83,6 +85,7 @@ def _compute_gae( # GAE: Generalized Advantage Estimation
     gamma: float,
     gae_lambda: float,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Compute Generalized Advantage Estimation targets."""
     advantages = np.zeros_like(rewards, dtype=np.float32)
     gae = 0.0
 
@@ -185,6 +188,7 @@ def train_mappo(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     env_options = dict(env_kwargs or {})
+    env_options.setdefault("collect_global_metrics", False)
     env = SumoTrafficEnv(
         config_file,
         possible_agents=traffic_light_ids,
@@ -194,7 +198,7 @@ def train_mappo(
     )
 
     observations, infos = env.reset(seed=seed)
-    agent_ids = tuple(traffic_light_ids)
+    agent_ids = tuple(traffic_light_ids or env.agents)
     if not agent_ids:
         env.close()
         raise ValueError("traffic_light_ids must contain at least one agent.")
@@ -202,12 +206,20 @@ def train_mappo(
     obs_dim = int(np.asarray(observations[agent_ids[0]], dtype=np.float32).shape[0])
     action_dim = int(env.action_space(agent_ids[0]).n)
     num_agents = len(agent_ids)
-    hidden_size = 64
+    hidden_size = 128
     critic_hidden_size = 256
 
     class Actor(nn.Module):
-        def __init__(self, obs_size: int, action_size: int) -> None:
+        def __init__(
+            self,
+            obs_size: int,
+            action_size: int,
+            phase_queue_start: int | None = None,
+        ) -> None:
             super().__init__()
+            self.action_size = action_size
+            self.phase_queue_start = phase_queue_start
+            self.queue_logit_scale = nn.Parameter(torch.tensor(2.0))
             self.net = nn.Sequential(
                 nn.Linear(obs_size, hidden_size),
                 nn.ReLU(),
@@ -217,7 +229,13 @@ def train_mappo(
             )
 
         def forward(self, obs: torch.Tensor) -> torch.Tensor:
-            return self.net(obs)
+            logits = self.net(obs)
+            if self.phase_queue_start is not None:
+                phase_queues = obs[
+                    ..., self.phase_queue_start : self.phase_queue_start + self.action_size
+                ]
+                logits = logits + self.queue_logit_scale.clamp(0.0, 5.0) * phase_queues
+            return logits
 
     class Critic(nn.Module):
         def __init__(self, central_obs_size: int) -> None:
@@ -227,22 +245,28 @@ def train_mappo(
                 nn.ReLU(),
                 nn.Linear(critic_hidden_size, critic_hidden_size),
                 nn.ReLU(),
-                nn.Linear(critic_hidden_size, 1),
+                nn.Linear(critic_hidden_size, num_agents),
             )
 
         def forward(self, central_obs: torch.Tensor) -> torch.Tensor:
-            return self.net(central_obs).squeeze(-1)
+            return self.net(central_obs)
 
-    actor = Actor(obs_dim, action_dim).to(device)
+    phase_queue_start = None
+    if env_options.get("include_phase_queue_features", True):
+        phase_queue_start = int(env.max_lanes_per_tls) + 2
+
+    actor = Actor(obs_dim, action_dim, phase_queue_start=phase_queue_start).to(device)
     critic = Critic(obs_dim * num_agents).to(device)
-    optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=2e-4)
+    learning_rate = 3e-4
+    optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=learning_rate)
 
     gamma = 0.99
     gae_lambda = 0.95
     clip_coef = 0.2
-    update_epochs = 10
-    entropy_coef = 0.1
+    update_epochs = 8
+    entropy_coef = 0.005
     value_coef = 0.5
+    local_reward_weight = 0.8
 
     value_norm = RunningMeanStd()
 
@@ -260,17 +284,10 @@ def train_mappo(
         rollout_actions: list[np.ndarray] = []
         rollout_log_probs: list[np.ndarray] = []
         rollout_masks: list[np.ndarray] = []
-        rollout_rewards: list[float] = []
-        rollout_values: list[float] = []
+        rollout_rewards: list[np.ndarray] = []
+        rollout_values: list[np.ndarray] = []
         rollout_dones: list[bool] = []
 
-        # --- Rollout Collection Phase ---
-        # Interact with the environment for `rollout_steps` to gather a trajectory of experiences.
-        # For MAPPO, we record:
-        # - Local observations: Used by the shared Actor network for decentralized execution.
-        # - Centralized observations: Concatenated views used by the Critic for centralized training.
-        # - Action masks: Ensures the Categorical distribution only samples valid green phases.
-        # - Shared team rewards: The mean reward across agents to encourage global traffic optimization.
         while len(rollout_rewards) < rollout_steps and global_steps < total_timesteps:
             local_obs = _stack_agent_observations(observations, agent_ids)
             central_obs = local_obs.reshape(-1)
@@ -292,24 +309,26 @@ def train_mappo(
                 for agent_id, action in zip(agent_ids, actions_tensor.cpu().tolist())
             }
             next_observations, rewards, terminations, truncations, next_infos = env.step(actions)
-            team_reward = float(np.mean(list(rewards.values()))) if rewards else 0.0
+            local_rewards = np.asarray([float(rewards.get(agent_id, 0.0)) for agent_id in agent_ids], dtype=np.float32)
+            global_reward = float(np.mean(local_rewards)) if local_rewards.size else 0.0
+            blended_rewards = local_reward_weight * local_rewards + (1.0 - local_reward_weight) * global_reward
             done = bool(any(terminations.values()) or any(truncations.values()))
 
-            value_denorm = float(value_tensor.item()) * value_norm.std + value_norm.mean
+            value_denorm = value_tensor.detach().cpu().numpy().astype(np.float32) * value_norm.std + value_norm.mean
 
             rollout_local_obs.append(local_obs)
             rollout_central_obs.append(central_obs)
             rollout_actions.append(np.asarray(actions_tensor.cpu().tolist(), dtype=np.int64))
             rollout_log_probs.append(np.asarray(log_probs_tensor.cpu().tolist(), dtype=np.float32))
             rollout_masks.append(mask_array)
-            rollout_rewards.append(team_reward)
+            rollout_rewards.append(blended_rewards)
             rollout_values.append(value_denorm)
             rollout_dones.append(done)
 
             global_steps += 1
             observations = next_observations
             infos = next_infos
-            current_episode_return += team_reward
+            current_episode_return += float(np.mean(blended_rewards))
 
             if done:
                 episode_index += 1
@@ -321,25 +340,20 @@ def train_mappo(
         if not rollout_rewards:
             break
 
-        # --- Value Bootstrapping ---
-        # If the rollout episode hasn't reached a terminal state, we bootstrap 
-        # the value of the last state to ensure correct advantage estimation.
         if rollout_dones[-1]:
-            last_value = 0.0
+            last_value = np.zeros(num_agents, dtype=np.float32)
         else:
             with torch.no_grad():
                 next_local_obs = _stack_agent_observations(observations, agent_ids)
                 next_central_obs = next_local_obs.reshape(-1)
                 next_central_obs_tensor = torch.as_tensor(next_central_obs, dtype=torch.float32, device=device)
-                raw_value = float(critic(next_central_obs_tensor).item())
+                raw_value = critic(next_central_obs_tensor).detach().cpu().numpy().astype(np.float32)
                 last_value = raw_value * value_norm.std + value_norm.mean
 
         rewards_array = np.asarray(rollout_rewards, dtype=np.float32)
         values_array = np.asarray(rollout_values, dtype=np.float32)
         dones_array = np.asarray(rollout_dones, dtype=np.bool_)
 
-        # --- Advantage Estimation (GAE) ---
-        # We use Generalized Advantage Estimation to compute targets for both actor and critic.
         advantages, returns = _compute_gae(
             rewards_array,
             values_array,
@@ -348,34 +362,37 @@ def train_mappo(
             gamma,
             gae_lambda,
         )
-        #Advantage normalisation
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        normalised_returns = (returns - value_norm.mean) / value_norm.std
         value_norm.update(returns)
+        normalized_returns = (returns - value_norm.mean) / value_norm.std
 
-        # --- Batch Preparation & Normalization ---
-        # Convert gathered trajectories into flattened PyTorch tensors. 
-        # In parameter-sharing MAPPO, all agents' local observations are treated as 
-        # part of the same batch to train the shared actor network.
-        # Advantages are normalized to zero-mean/unit-variance to stabilize the gradient.
         local_obs_batch = np.concatenate(rollout_local_obs, axis=0)
         action_batch = np.concatenate(rollout_actions, axis=0)
         old_log_prob_batch = np.concatenate(rollout_log_probs, axis=0)
         mask_batch = np.concatenate(rollout_masks, axis=0)
-        advantage_batch = np.repeat(advantages, num_agents)
-        return_batch = torch.as_tensor(normalised_returns, dtype=torch.float32, device=device)
-        central_obs_batch = torch.as_tensor(np.asarray(rollout_central_obs), dtype=torch.float32, device=device)
+        advantage_batch = advantages.reshape(-1)
+        return_batch = torch.as_tensor(normalized_returns, dtype=torch.float32, device=device)
+        central_obs_batch = torch.as_tensor(
+            np.asarray(rollout_central_obs),
+            dtype=torch.float32,
+            device=device,
+        )
 
         actor_obs_batch = torch.as_tensor(local_obs_batch, dtype=torch.float32, device=device)
         actor_action_batch = torch.as_tensor(action_batch, dtype=torch.int64, device=device)
-        old_log_prob_batch_tensor = torch.as_tensor(old_log_prob_batch, dtype=torch.float32, device=device)
-        advantage_batch_tensor = torch.as_tensor(advantage_batch, dtype=torch.float32, device=device)
+        old_log_prob_batch_tensor = torch.as_tensor(
+            old_log_prob_batch,
+            dtype=torch.float32,
+            device=device,
+        )
+        advantage_batch_tensor = torch.as_tensor(
+            advantage_batch,
+            dtype=torch.float32,
+            device=device,
+        )
         mask_batch_tensor = torch.as_tensor(mask_batch, dtype=torch.float32, device=device)
 
-        # --- Policy & Value Network Updates ---
-        # Optimize the shared actor and centralized critic using the PPO clipped 
-        # surrogate objective across multiple epochs.
         for _ in range(update_epochs):
             logits = actor(actor_obs_batch)
             masked_logits = _mask_logits(logits, mask_batch_tensor)
@@ -384,9 +401,7 @@ def train_mappo(
             ratio = torch.exp(new_log_probs - old_log_prob_batch_tensor)
             unclipped = ratio * advantage_batch_tensor
             clipped = torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef) * advantage_batch_tensor
-            
-            # The PPO clipped surrogate objective: take the minimum of the clipped and 
-            # unclipped values to prevent over-optimistic policy updates.
+
             policy_loss = -torch.min(unclipped, clipped).mean()
             entropy_loss = dist.entropy().mean()
 
@@ -396,17 +411,21 @@ def train_mappo(
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(list(actor.parameters()) + list(critic.parameters()), 0.5)
+            torch.nn.utils.clip_grad_norm_(
+                list(actor.parameters()) + list(critic.parameters()),
+                0.5,
+            )
             optimizer.step()
 
-        # --- Metrics Logging ---
-        # Record training progress for visualization in the notebook.
         history.append(
             {
                 "algorithm": "mappo",
                 "timestep": global_steps,
                 "mean_training_reward": float(np.mean(rewards_array)),
-                "moving_avg_episode_return": float(np.mean(episode_returns)) if episode_returns else 0.0,
+                "moving_avg_episode_return": (
+                    float(np.mean(episode_returns)) if episode_returns else 0.0
+                ),
+                "episodes_completed": episode_index,
             }
         )
 
@@ -429,10 +448,12 @@ def train_mappo(
             "gamma": gamma,
             "gae_lambda": gae_lambda,
             "clip_coef": clip_coef,
-            "learning_rate": 3e-4,
+            "learning_rate": learning_rate,
             "update_epochs": update_epochs,
             "entropy_coef": entropy_coef,
             "value_coef": value_coef,
+            "local_reward_weight": local_reward_weight,
+            "phase_queue_start": phase_queue_start,
             "env_kwargs": env_options,
         },
         device=str(device),
