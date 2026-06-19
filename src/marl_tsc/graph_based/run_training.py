@@ -67,6 +67,8 @@ def run_training(
                     "mean_training_reward",
                     0.0,
                 ),
+                
+
                 "actor_loss": stats.get(
                     "actor_loss",
                     0.0,

@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import numpy as np
 from torch.distributions import Categorical
 
 
@@ -46,6 +47,8 @@ class Transition:
     value: torch.Tensor
 
     reward_dict: dict
+
+    action_masks: dict
 
     done: bool
 
@@ -73,19 +76,37 @@ class GraphRunner:
         )
 
         for _ in range(num_steps):
-
             policy_output = self.policy(
                 graph_obs
             )
 
+          
+            masks = np.stack(
+                [
+                    infos[agent]["action_mask"]
+                    for agent in graph_obs.agent_ids
+                ]
+            )
+
+            mask_tensor = (
+                torch.from_numpy(masks)
+                .bool()
+                .to(policy_output.logits.device)
+            )
+
+            masked_logits = policy_output.logits.masked_fill(
+                ~mask_tensor,
+                -1e9,
+            )
+
             dist = Categorical(
-                logits=policy_output.logits
+                logits=masked_logits
             )
 
             actions = dist.sample()
 
             log_probs = dist.log_prob(
-              actions
+                actions
             )
 
             action_dict = {
@@ -120,6 +141,7 @@ class GraphRunner:
                     logits=policy_output.logits.detach(),
                     value=policy_output.value.detach(),
                     reward_dict=rewards,
+                    action_masks=mask_tensor.cpu(),
                     done=done,
                 )
             )

@@ -27,11 +27,57 @@ the actor learns decentralized traffic-light policies.
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from .base_trainer import BaseGraphTrainer
+
+class RunningMeanStd:
+
+    def __init__(self):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = 1e-4
+
+    def update(self, x):
+
+        x = np.asarray(x)
+
+        batch_mean = x.mean()
+        batch_var = x.var()
+        batch_count = len(x)
+
+        delta = batch_mean - self.mean
+
+        total_count = self.count + batch_count
+
+        new_mean = (
+            self.mean
+            + delta * batch_count / total_count
+        )
+
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+
+        m2 = (
+            m_a
+            + m_b
+            + delta**2
+            * self.count
+            * batch_count
+            / total_count
+        )
+
+        self.mean = new_mean
+        self.var = m2 / total_count
+        self.count = total_count
+
+    @property
+    def std(self):
+        return np.sqrt(self.var)
+
 
 class GraphCTDETrainer(BaseGraphTrainer):
 
@@ -53,7 +99,8 @@ class GraphCTDETrainer(BaseGraphTrainer):
         #gamma=gamma,
         gae_lambda=gae_lambda,
     )
-  
+    self.value_normalizer = RunningMeanStd()
+   
   def update(
     self,
     rollout_batch,
@@ -62,6 +109,36 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
       advantages = advantage_batch.advantages
       returns = advantage_batch.returns
+      
+      self.value_normalizer.update(
+      returns.cpu().numpy()
+      )
+      print(
+        f"ValueNorm mean={self.value_normalizer.mean:.3f} "
+        f"std={self.value_normalizer.std:.3f}"
+      )
+
+      normalized_returns = (
+          returns
+          - self.value_normalizer.mean
+      ) / (
+          self.value_normalizer.std
+          + 1e-8
+      )
+      '''    
+      print(
+        f"Returns: mean={returns.mean():.4f} "
+        f"std={returns.std():.4f} "
+        f"min={returns.min():.4f} "
+        f"max={returns.max():.4f}"
+      ) 
+
+      print(
+        f"Advantages: mean={advantages.mean():.4f} "
+        f"std={advantages.std():.4f} "
+        f"min={advantages.min():.4f} "
+        f"max={advantages.max():.4f}"
+      )'''
 
       advantages = (
           advantages
@@ -105,6 +182,10 @@ class GraphCTDETrainer(BaseGraphTrainer):
               log_probs.sum()
               * advantages[t].detach()
           )
+          print(
+              f"value={output.value.mean().item():.3f} "
+              f"target={normalized_returns[t].item():.3f}"
+          )
 
           #
           # Critic
@@ -112,7 +193,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
           critic_loss = F.mse_loss(
               output.value.squeeze(),
-              returns[t].detach(),
+              normalized_returns[t].detach(),
           )
 
           actor_losses.append(
