@@ -102,22 +102,21 @@ class GraphCTDETrainer(BaseGraphTrainer):
     self.value_normalizer = RunningMeanStd()
    
   def update(
-    self,
-    rollout_batch,
-    advantage_batch
-    ):
+      self,
+      rollout_batch,
+      advantage_batch
+  ):
 
       advantages = advantage_batch.advantages
       returns = advantage_batch.returns
-      
-      self.value_normalizer.update(
-      returns.cpu().numpy()
-      )
-      print(
-        f"ValueNorm mean={self.value_normalizer.mean:.3f} "
-        f"std={self.value_normalizer.std:.3f}"
-      )
 
+      # -----------------------------
+      # FIX 1: normalize using the CURRENT (pre-update) mean/std,
+      # THEN update the normalizer with the raw returns.
+      # Previously this was backwards: the normalizer was updated
+      # first, so normalized_returns used stats that had already
+      # shifted away from the batch they're meant to normalize.
+      # -----------------------------
       normalized_returns = (
           returns
           - self.value_normalizer.mean
@@ -125,20 +124,15 @@ class GraphCTDETrainer(BaseGraphTrainer):
           self.value_normalizer.std
           + 1e-8
       )
-      '''    
-      print(
-        f"Returns: mean={returns.mean():.4f} "
-        f"std={returns.std():.4f} "
-        f"min={returns.min():.4f} "
-        f"max={returns.max():.4f}"
-      ) 
+
+      self.value_normalizer.update(
+          returns.cpu().numpy()
+      )
 
       print(
-        f"Advantages: mean={advantages.mean():.4f} "
-        f"std={advantages.std():.4f} "
-        f"min={advantages.min():.4f} "
-        f"max={advantages.max():.4f}"
-      )'''
+          f"ValueNorm mean={self.value_normalizer.mean:.3f} "
+          f"std={self.value_normalizer.std:.3f}"
+      )
 
       advantages = (
           advantages
@@ -155,6 +149,9 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
       actor_losses = []
       critic_losses = []
+      entropy_losses = []          # NEW: collect entropy per step
+
+      entropy_coef = 0.01           # NEW: small entropy bonus weight (tune as needed)
 
       for t, graph_obs in enumerate(
           rollout_batch.observations
@@ -182,6 +179,10 @@ class GraphCTDETrainer(BaseGraphTrainer):
               log_probs.sum()
               * advantages[t].detach()
           )
+
+          # NEW: entropy bonus (negative sign added later, when combining losses)
+          entropy_loss = dist.entropy().sum()
+
           print(
               f"value={output.value.mean().item():.3f} "
               f"target={normalized_returns[t].item():.3f}"
@@ -204,6 +205,10 @@ class GraphCTDETrainer(BaseGraphTrainer):
               critic_loss
           )
 
+          entropy_losses.append(     # NEW
+              entropy_loss
+          )
+
       actor_loss = torch.stack(
           actor_losses
       ).mean()
@@ -212,17 +217,33 @@ class GraphCTDETrainer(BaseGraphTrainer):
           critic_losses
       ).mean()
 
+      entropy_loss = torch.stack(    # NEW
+          entropy_losses
+      ).mean()
+
+      # NEW: subtract entropy bonus so the optimizer is encouraged
+      # to keep some randomness in the policy (prevents premature collapse)
       total_loss = (
           actor_loss
           + critic_loss
+          - entropy_coef * entropy_loss
       )
+
       mean_reward = float(
-      rollout_batch.rewards.mean()
+          rollout_batch.rewards.mean()
       )
 
       self.optimizer.zero_grad()
 
       total_loss.backward()
+
+      # NEW: clip gradient norm across all params before stepping.
+      # Bounds how far a single noisy rollout's gradient can move the
+      # shared actor+critic network in one update.
+      torch.nn.utils.clip_grad_norm_(
+          self.policy.parameters(),
+          max_norm=0.5,
+      )
 
       self.optimizer.step()
 
@@ -232,6 +253,9 @@ class GraphCTDETrainer(BaseGraphTrainer):
           ),
           "critic_loss": float(
               critic_loss.detach()
+          ),
+          "entropy_loss": float(      # NEW: log it so you can watch it over training
+              entropy_loss.detach()
           ),
           "total_loss": float(
               total_loss.detach()
