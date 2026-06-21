@@ -1,30 +1,3 @@
-"""
-graph_ctde_trainer.py
-
-Centralized Training, Decentralized Execution (CTDE) trainer for
-graph-based traffic signal control.
-
-This implementation intentionally uses a simple actor-critic update
-rather than PPO. The goal is to provide a clear and extensible baseline
-for graph-based MARL experiments.
-
-Architecture:
-
-    GraphObservation
-            ↓
-        GATEncoder
-            ↓
-      Actor Head
-      Critic Head
-            ↓
-       Actor-Critic
-            ↓
-      Gradient Update
-
-The critic learns a global value estimate for the traffic network while
-the actor learns decentralized traffic-light policies.
-"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -34,6 +7,7 @@ from torch.distributions import Categorical
 
 from .base_trainer import BaseGraphTrainer
 
+
 class RunningMeanStd:
 
     def __init__(self):
@@ -42,7 +16,6 @@ class RunningMeanStd:
         self.count = 1e-4
 
     def update(self, x):
-
         x = np.asarray(x)
 
         batch_mean = x.mean()
@@ -81,193 +54,200 @@ class RunningMeanStd:
 
 class GraphCTDETrainer(BaseGraphTrainer):
 
-  def __init__(
-      self,
-      env,
-      policy,
-      optimizer,
-      rollout_steps=64,
-      #gamma=0.99,
-      gae_lambda=0.95,
-  ):
+    def __init__(
+        self,
+        env,
+        policy,
+        optimizer,
+        rollout_steps=64,
+        gae_lambda=0.95,
+    ):
+        super().__init__(
+            env=env,
+            policy=policy,
+            optimizer=optimizer,
+            rollout_steps=rollout_steps,
+            gae_lambda=gae_lambda,
+        )
+        self.value_normalizer = RunningMeanStd()
 
-    super().__init__(
-        env=env,
-        policy=policy,
-        optimizer=optimizer,
-        rollout_steps=rollout_steps,
-        #gamma=gamma,
-        gae_lambda=gae_lambda,
-    )
-    self.value_normalizer = RunningMeanStd()
-   
-  def update(
-      self,
-      rollout_batch,
-      advantage_batch
-  ):
+    def update(
+        self,
+        rollout_batch,
+        advantage_batch
+    ):
 
-      advantages = advantage_batch.advantages
-      returns = advantage_batch.returns
+        advantages = advantage_batch.advantages  # (T, N)
+        returns = advantage_batch.returns        # (T, N)
 
-      # -----------------------------
-      # FIX 1: normalize using the CURRENT (pre-update) mean/std,
-      # THEN update the normalizer with the raw returns.
-      # Previously this was backwards: the normalizer was updated
-      # first, so normalized_returns used stats that had already
-      # shifted away from the batch they're meant to normalize.
-      # -----------------------------
-      normalized_returns = (
-          returns
-          - self.value_normalizer.mean
-      ) / (
-          self.value_normalizer.std
-          + 1e-8
-      )
+        # -----------------------------
+        # Value normalization, using PRE-update stats, then update
+        # the normalizer afterward (ordering fix from earlier).
+        #
+        # CHANGED: returns is now (T, N) instead of (T,). The
+        # normalizer itself stays scalar (single running mean/std
+        # across all agents and timesteps combined) -- there's no
+        # need for a per-agent normalizer, since all agents share
+        # the same reward scale/distribution by construction. Only
+        # the shape of what gets normalized has changed.
+        # -----------------------------
+        normalized_returns = (
+            returns
+            - self.value_normalizer.mean
+        ) / (
+            self.value_normalizer.std
+            + 1e-8
+        )
 
-      self.value_normalizer.update(
-          returns.cpu().numpy()
-      )
+        # Flatten before updating the normalizer's running stats,
+        # since RunningMeanStd.update() expects a 1D array.
+        self.value_normalizer.update(
+            returns.flatten().cpu().numpy()
+        )
 
-      print(
-          f"ValueNorm mean={self.value_normalizer.mean:.3f} "
-          f"std={self.value_normalizer.std:.3f}"
-      )
+        print(
+            f"ValueNorm mean={self.value_normalizer.mean:.3f} "
+            f"std={self.value_normalizer.std:.3f}"
+        )
 
-      advantages = (
-          advantages
-          - advantages.mean()
-      ) / (
-          advantages.std()
-          + 1e-8
-      )
+        # CHANGED: advantage normalization now operates across the
+        # full (T, N) tensor -- mean/std computed over all agents and
+        # timesteps together. This keeps advantages on a comparable
+        # scale across agents, which matters since some agents may
+        # have systematically higher-variance local rewards than
+        # others (e.g. busier intersections).
+        advantages = (
+            advantages
+            - advantages.mean()
+        ) / (
+            advantages.std()
+            + 1e-8
+        )
 
-      # -----------------------------
-      # Replay observations through
-      # current network
-      # -----------------------------
+        # -----------------------------
+        # Replay observations through current network
+        # -----------------------------
 
-      actor_losses = []
-      critic_losses = []
-      entropy_losses = []          # NEW: collect entropy per step
+        actor_losses = []
+        critic_losses = []
+        entropy_losses = []
 
-      entropy_coef = 0.01           # NEW: small entropy bonus weight (tune as needed)
+        entropy_coef = 0.01
 
-      for t, graph_obs in enumerate(
-          rollout_batch.observations
-      ):
+        for t, graph_obs in enumerate(
+            rollout_batch.observations
+        ):
 
-          output = self.policy(
-              graph_obs
-          )
+            output = self.policy(
+                graph_obs
+            )
 
-          dist = Categorical(
-              logits=output.logits
-          )
+            dist = Categorical(
+                logits=output.logits
+            )
 
-          actions = rollout_batch.actions[t]
+            actions = rollout_batch.actions[t]  # (N,)
 
-          log_probs = dist.log_prob(
-              actions
-          )
+            log_probs = dist.log_prob(
+                actions
+            )  # (N,)
 
-          #
-          # Actor
-          #
+            #
+            # Actor
+            #
+            # CHANGED: per-agent advantage multiplied against each
+            # agent's own log-prob BEFORE summing, instead of summing
+            # log-probs first and multiplying by one shared scalar.
+            # This is the actual credit-assignment fix -- each agent's
+            # gradient now reflects its own advantage.
+            #
+            actor_loss = -(
+                log_probs
+                * advantages[t].detach()
+            ).sum()
 
-          actor_loss = -(
-              log_probs.sum()
-              * advantages[t].detach()
-          )
+            entropy_loss = dist.entropy().sum()
 
-          # NEW: entropy bonus (negative sign added later, when combining losses)
-          entropy_loss = dist.entropy().sum()
+            print(
+                f"value={output.value.mean().item():.3f} "
+                f"target={normalized_returns[t].mean().item():.3f}"
+            )
 
-          print(
-              f"value={output.value.mean().item():.3f} "
-              f"target={normalized_returns[t].item():.3f}"
-          )
+            #
+            # Critic
+            #
+            # CHANGED: output.value is now (N, 1) from the per-node
+            # CriticHead. Squeeze to (N,) and compare directly against
+            # normalized_returns[t], which is also (N,) -- no more
+            # .mean() collapse needed since shapes now match natively.
+            #
+            critic_loss = F.mse_loss(
+                output.value.squeeze(-1),
+                normalized_returns[t].detach(),
+            )
 
-          #
-          # Critic
-          #
+            actor_losses.append(
+                actor_loss
+            )
 
-          critic_loss = F.mse_loss(
-              output.value.squeeze(),
-              normalized_returns[t].detach(),
-          )
+            critic_losses.append(
+                critic_loss
+            )
 
-          actor_losses.append(
-              actor_loss
-          )
+            entropy_losses.append(
+                entropy_loss
+            )
 
-          critic_losses.append(
-              critic_loss
-          )
+        actor_loss = torch.stack(
+            actor_losses
+        ).mean()
 
-          entropy_losses.append(     # NEW
-              entropy_loss
-          )
+        critic_loss = torch.stack(
+            critic_losses
+        ).mean()
 
-      actor_loss = torch.stack(
-          actor_losses
-      ).mean()
+        entropy_loss = torch.stack(
+            entropy_losses
+        ).mean()
 
-      critic_loss = torch.stack(
-          critic_losses
-      ).mean()
+        total_loss = (
+            actor_loss
+            + critic_loss
+            - entropy_coef * entropy_loss
+        )
 
-      entropy_loss = torch.stack(    # NEW
-          entropy_losses
-      ).mean()
+        self.optimizer.zero_grad()
 
-      # NEW: subtract entropy bonus so the optimizer is encouraged
-      # to keep some randomness in the policy (prevents premature collapse)
-      total_loss = (
-          actor_loss
-          + critic_loss
-          - entropy_coef * entropy_loss
-      )
+        total_loss.backward()
 
-      mean_reward = float(
-          rollout_batch.rewards.mean()
-      )
+        torch.nn.utils.clip_grad_norm_(
+            self.policy.parameters(),
+            max_norm=0.5,
+        )
 
-      self.optimizer.zero_grad()
+        self.optimizer.step()
 
-      total_loss.backward()
+        result = {
+            "actor_loss": float(
+                actor_loss.detach()
+            ),
+            "critic_loss": float(
+                critic_loss.detach()
+            ),
+            "entropy_loss": float(
+                entropy_loss.detach()
+            ),
+            "total_loss": float(
+                total_loss.detach()
+            ),
+            "rollout_length": len(
+                rollout_batch.observations
+            ),
+            "mean_training_reward": float(
+                rollout_batch.rewards.mean()
+            ),
+        }
 
-      # NEW: clip gradient norm across all params before stepping.
-      # Bounds how far a single noisy rollout's gradient can move the
-      # shared actor+critic network in one update.
-      torch.nn.utils.clip_grad_norm_(
-          self.policy.parameters(),
-          max_norm=0.5,
-      )
+        print("UPDATE RETURN:", result)
 
-      self.optimizer.step()
-
-      result = {
-          "actor_loss": float(
-              actor_loss.detach()
-          ),
-          "critic_loss": float(
-              critic_loss.detach()
-          ),
-          "entropy_loss": float(      # NEW: log it so you can watch it over training
-              entropy_loss.detach()
-          ),
-          "total_loss": float(
-              total_loss.detach()
-          ),
-          "rollout_length": len(
-              rollout_batch.observations
-          ),
-          "mean_training_reward": float(
-              rollout_batch.rewards.mean()
-          ),
-      }
-
-      print("UPDATE RETURN:", result)
-
-      return result
+        return result
