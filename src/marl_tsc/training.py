@@ -241,6 +241,7 @@ def evaluate_policy(
                     break
 
                 actions = _actions_from_policy(policy, env, observations, step_index, infos=infos)
+                print(f"Actions: {actions}")
                 observations, rewards, _, truncations, infos = env.step(actions)
 
                 episode_reward += float(sum(rewards.values()))

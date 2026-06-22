@@ -48,7 +48,8 @@ def train_graph_ctde(
     rollout_steps=1024,
     max_steps=1000,
     seed=42,
-    learning_rate=1e-3,
+    actor_learning_rate=1e-3,
+    critic_learning_rate=3e-3,
     hidden_dim=64,
     #gamma=0.99,
     gae_lambda=0.95,
@@ -122,9 +123,19 @@ def train_graph_ctde(
         # Optimizer
         #
 
-        optimizer = torch.optim.Adam(
+        '''optimizer = torch.optim.Adam(
             policy.parameters(),
             lr=learning_rate,
+        )'''
+        actor_optimizer = torch.optim.Adam(
+            list(policy.encoder.parameters())
+            + list(policy.actor_head.parameters()),
+            lr=actor_learning_rate,
+        )
+
+        critic_optimizer = torch.optim.Adam(
+            policy.critic_head.parameters(),
+            lr=critic_learning_rate,
         )
 
         #
@@ -134,7 +145,9 @@ def train_graph_ctde(
         trainer = GraphCTDETrainer(
             env=env,
             policy=policy,
-            optimizer=optimizer,
+            #optimizer=optimizer,
+            actor_optimizer=actor_optimizer,
+            critic_optimizer=critic_optimizer,
             rollout_steps=rollout_steps,
             #gamma=gamma,
             gae_lambda=gae_lambda,

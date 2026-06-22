@@ -8,6 +8,16 @@ from torch.distributions import Categorical
 from .base_trainer import BaseGraphTrainer
 
 
+def get_grad_norm(parameters):
+    """Compute the total L2 norm of gradients for a set of parameters."""
+    parameters = [p for p in parameters if p.grad is not None]
+    if len(parameters) == 0:
+        return 0.0
+    total_norm = torch.norm(
+        torch.stack([torch.norm(p.grad.detach(), 2) for p in parameters]), 2
+    )
+    return total_norm.item()
+
 class RunningMeanStd:
 
     def __init__(self):
@@ -56,20 +66,26 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
     def __init__(
         self,
-        env,
-        policy,
-        optimizer,
-        rollout_steps=64,
-        gae_lambda=0.95,
+      env,
+      policy,
+      actor_optimizer,
+      critic_optimizer,
+      rollout_steps=64,
+      gae_lambda=0.95,
+
     ):
         super().__init__(
             env=env,
             policy=policy,
-            optimizer=optimizer,
+            #optimizer=optimizer,
             rollout_steps=rollout_steps,
             gae_lambda=gae_lambda,
+            #actor_optimizer = actor_optimizer,
+            #critic_optimizer = critic_optimizer
         )
         self.value_normalizer = RunningMeanStd()
+        self.actor_encoder_optimizer = actor_optimizer
+        self.critic_optimizer = critic_optimizer
 
     def update(
         self,
@@ -145,6 +161,25 @@ class GraphCTDETrainer(BaseGraphTrainer):
             dist = Categorical(
                 logits=output.logits
             )
+            entropy = dist.entropy().sum()
+
+            logit_gap = (
+                output.logits.max(dim=-1).values
+                - output.logits.min(dim=-1).values
+            ).mean()
+
+            probs = torch.softmax(
+                output.logits,
+                dim=-1
+            )
+
+            max_prob = probs.max(dim=-1).values.mean()
+
+            print(
+                f"entropy={entropy.item():.4f} | "
+                f"logit_gap={logit_gap.item():.4f} | "
+                f"max_prob={max_prob.item():.4f}"
+            )
 
             actions = rollout_batch.actions[t]  # (N,)
 
@@ -215,17 +250,52 @@ class GraphCTDETrainer(BaseGraphTrainer):
             + critic_loss
             - entropy_coef * entropy_loss
         )
-
-        self.optimizer.zero_grad()
+        self.critic_optimizer.zero_grad()
+        self.actor_encoder_optimizer.zero_grad()
 
         total_loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(self.policy.critic_head.parameters(), max_norm=0.5)
+        torch.nn.utils.clip_grad_norm_(
+            list(self.policy.encoder.parameters()) + list(self.policy.actor_head.parameters()),
+            max_norm=0.5,
+        )
+
+        self.critic_optimizer.step()
+        self.actor_encoder_optimizer.step()
+
+        '''self.optimizer.zero_grad()
+
+        total_loss.backward()
+
+        # Diagnostic: check gradient norms before clipping
+        critic_grad_norm = get_grad_norm(self.policy.critic_head.parameters())
+        actor_grad_norm = get_grad_norm(self.policy.actor_head.parameters())
+        encoder_grad_norm = get_grad_norm(self.policy.encoder.parameters())
+
+        print(f"GRAD NORMS — critic: {critic_grad_norm:.6f}  actor: {actor_grad_norm:.6f}  encoder: {encoder_grad_norm:.6f}")
+
 
         torch.nn.utils.clip_grad_norm_(
             self.policy.parameters(),
             max_norm=0.5,
         )
+        
+        actor_grad = 0.0
 
-        self.optimizer.step()
+        for name, param in self.policy.named_parameters():
+
+            if "actor" in name and param.grad is not None:
+
+                actor_grad += (
+                    param.grad.norm().item()
+                )
+
+        print(
+            f"Actor grad norm={actor_grad:.6f}"
+        )'''
+
+        #self.optimizer.step()
 
         result = {
             "actor_loss": float(

@@ -48,7 +48,7 @@ class BaseGraphTrainer(ABC):
         self,
         env,
         policy,
-        optimizer,
+        #optimizer,
         rollout_steps: int = 64,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
@@ -56,7 +56,7 @@ class BaseGraphTrainer(ABC):
 
         self.env = env
         self.policy = policy
-        self.optimizer = optimizer
+        #self.optimizer = optimizer
 
         self.rollout_steps = rollout_steps
 
