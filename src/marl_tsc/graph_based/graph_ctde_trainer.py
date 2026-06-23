@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
+from collections import Counter
 
 from .base_trainer import BaseGraphTrainer
 
@@ -140,6 +141,14 @@ class GraphCTDETrainer(BaseGraphTrainer):
             + 1e-8
         )
 
+        print(
+            "ADV:",
+            f"mean={advantages.mean().item():.4f}",
+            f"std={advantages.std().item():.4f}",
+            f"min={advantages.min().item():.4f}",
+            f"max={advantages.max().item():.4f}",
+        )
+
         # -----------------------------
         # Replay observations through current network
         # -----------------------------
@@ -153,10 +162,23 @@ class GraphCTDETrainer(BaseGraphTrainer):
         for t, graph_obs in enumerate(
             rollout_batch.observations
         ):
-
+            #print(f"GRAPH OBS{graph_obs}")
             output = self.policy(
                 graph_obs
             )
+
+            if t == 0:
+                emb = output.encoder_output.node_embeddings
+
+                print(
+                    f"emb_mean={emb.mean().item():.4f} "
+                    f"emb_std={emb.std().item():.4f}"
+                )
+
+                print(
+                    "first_node_emb:",
+                    emb[0][:5].detach().cpu().numpy()
+                )
 
             dist = Categorical(
                 logits=output.logits
@@ -183,6 +205,13 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
             actions = rollout_batch.actions[t]  # (N,)
 
+            print(
+                Counter(
+                    rollout_batch.actions.flatten().tolist()
+                )
+            )
+
+
             log_probs = dist.log_prob(
                 actions
             )  # (N,)
@@ -196,9 +225,10 @@ class GraphCTDETrainer(BaseGraphTrainer):
             # This is the actual credit-assignment fix -- each agent's
             # gradient now reflects its own advantage.
             #
+            adv_scale = 5.0
             actor_loss = -(
                 log_probs
-                * advantages[t].detach()
+                * advantages[t].detach() * adv_scale
             ).sum()
 
             entropy_loss = dist.entropy().sum()
@@ -245,57 +275,142 @@ class GraphCTDETrainer(BaseGraphTrainer):
             entropy_losses
         ).mean()
 
-        total_loss = (
-            actor_loss
-            + critic_loss
-            - entropy_coef * entropy_loss
-        )
-        self.critic_optimizer.zero_grad()
-        self.actor_encoder_optimizer.zero_grad()
+        #
+        # Critic updates
+        #
 
-        total_loss.backward()
+        critic_update_epochs = 5
 
-        torch.nn.utils.clip_grad_norm_(self.policy.critic_head.parameters(), max_norm=0.5)
-        torch.nn.utils.clip_grad_norm_(
-            list(self.policy.encoder.parameters()) + list(self.policy.actor_head.parameters()),
-            max_norm=0.5,
-        )
+        for _ in range(critic_update_epochs):
 
-        self.critic_optimizer.step()
-        self.actor_encoder_optimizer.step()
+            critic_losses_epoch = []
 
-        '''self.optimizer.zero_grad()
+            for t, graph_obs in enumerate(
+                rollout_batch.observations
+            ):
 
-        total_loss.backward()
-
-        # Diagnostic: check gradient norms before clipping
-        critic_grad_norm = get_grad_norm(self.policy.critic_head.parameters())
-        actor_grad_norm = get_grad_norm(self.policy.actor_head.parameters())
-        encoder_grad_norm = get_grad_norm(self.policy.encoder.parameters())
-
-        print(f"GRAD NORMS — critic: {critic_grad_norm:.6f}  actor: {actor_grad_norm:.6f}  encoder: {encoder_grad_norm:.6f}")
-
-
-        torch.nn.utils.clip_grad_norm_(
-            self.policy.parameters(),
-            max_norm=0.5,
-        )
-        
-        actor_grad = 0.0
-
-        for name, param in self.policy.named_parameters():
-
-            if "actor" in name and param.grad is not None:
-
-                actor_grad += (
-                    param.grad.norm().item()
+                output = self.policy(
+                    graph_obs
                 )
 
-        print(
-            f"Actor grad norm={actor_grad:.6f}"
-        )'''
+                critic_loss_t = F.mse_loss(
+                    output.value.squeeze(-1),
+                    normalized_returns[t].detach(),
+                )
 
-        #self.optimizer.step()
+                critic_losses_epoch.append(
+                    critic_loss_t
+                )
+
+            critic_loss_epoch = torch.stack(
+                critic_losses_epoch
+            ).mean()
+
+            self.critic_optimizer.zero_grad()
+
+            critic_loss_epoch.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                self.policy.critic_head.parameters(),
+                max_norm=0.5,
+            )
+
+            self.critic_optimizer.step()
+
+        #
+        # Recompute actor graph AFTER critic updates
+        #
+
+        actor_losses = []
+        entropy_losses = []
+
+        for t, graph_obs in enumerate(
+            rollout_batch.observations
+        ):
+
+            output = self.policy(
+                graph_obs
+            )
+
+            dist = Categorical(
+                logits=output.logits
+            )
+
+            log_probs = dist.log_prob(
+                rollout_batch.actions[t]
+            )
+
+            actor_loss_t = -(
+                log_probs
+                * advantages[t].detach()
+                * adv_scale
+            ).sum()
+
+            actor_losses.append(
+                actor_loss_t
+            )
+
+            entropy_losses.append(
+                dist.entropy().sum()
+            )
+
+        actor_loss = torch.stack(
+            actor_losses
+        ).mean()
+
+        entropy_loss = torch.stack(
+            entropy_losses
+        ).mean()
+
+        actor_objective = (
+            actor_loss
+            - entropy_coef * entropy_loss
+        )
+
+        self.actor_encoder_optimizer.zero_grad()
+
+        actor_objective.backward()
+
+        print(
+            "encoder_grad",
+            sum(
+                p.grad.norm().item()
+                for p in self.policy.encoder.parameters()
+                if p.grad is not None
+            )
+        )
+
+        print(
+            "actor_grad",
+            sum(
+                p.grad.norm().item()
+                for p in self.policy.actor_head.parameters()
+                if p.grad is not None
+            )
+        )
+
+        print(
+            "critic_grad",
+            sum(
+                p.grad.norm().item()
+                for p in self.policy.critic_head.parameters()
+                if p.grad is not None
+            )
+        )
+
+        torch.nn.utils.clip_grad_norm_(
+            list(self.policy.encoder.parameters())
+            + list(self.policy.actor_head.parameters()),
+            max_norm=0.5,
+        )
+
+        self.actor_encoder_optimizer.step()
+
+        total_loss = (
+            actor_loss
+            + critic_loss_epoch.detach()
+            - entropy_coef * entropy_loss
+        )
 
         result = {
             "actor_loss": float(
