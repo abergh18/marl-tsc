@@ -108,13 +108,15 @@ class GraphCTDETrainer(BaseGraphTrainer):
         # the same reward scale/distribution by construction. Only
         # the shape of what gets normalized has changed.
         # -----------------------------
+        '''
         normalized_returns = (
             returns
             - self.value_normalizer.mean
         ) / (
             self.value_normalizer.std
             + 1e-8
-        )
+        )'''
+        normalized_returns = returns
 
         # Flatten before updating the normalizer's running stats,
         # since RunningMeanStd.update() expects a 1D array.
