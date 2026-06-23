@@ -227,7 +227,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
             # This is the actual credit-assignment fix -- each agent's
             # gradient now reflects its own advantage.
             #
-            adv_scale = 5.0
+            adv_scale = 1.0
             actor_loss = -(
                 log_probs
                 * advantages[t].detach() * adv_scale
