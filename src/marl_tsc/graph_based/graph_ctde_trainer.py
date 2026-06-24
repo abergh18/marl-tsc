@@ -159,7 +159,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
         critic_losses = []
         entropy_losses = []
 
-        entropy_coef = 0.07
+        entropy_coef = 0.05
 
         for t, graph_obs in enumerate(
             rollout_batch.observations
