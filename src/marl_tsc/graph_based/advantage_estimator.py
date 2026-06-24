@@ -98,7 +98,7 @@ class AdvantageEstimator:
         # so passing a real value is always safe regardless of
         # whether the last step happened to be terminal or truncated.
         next_value = bootstrap_value  # (N,)
-        amp = 1.0#2.5
+        amp = 1#0 #2.5
         for t in reversed(range(len(rewards))):
             mask = 1.0 - dones[t]  # scalar, broadcasts against (N,)
           

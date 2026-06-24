@@ -71,6 +71,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
       policy,
       actor_optimizer,
       critic_optimizer,
+      entropy_coef = 5e-2
       rollout_steps=64,
       gae_lambda=0.95,
 
@@ -87,6 +88,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
         self.value_normalizer = RunningMeanStd()
         self.actor_encoder_optimizer = actor_optimizer
         self.critic_optimizer = critic_optimizer
+        self.entropy_coef = entropy_coef
 
     def update(
         self,
@@ -159,7 +161,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
         critic_losses = []
         entropy_losses = []
 
-        entropy_coef = 5e-2
+        #entropy_coef = 55e-2
 
         for t, graph_obs in enumerate(
             rollout_batch.observations
@@ -227,7 +229,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
             # This is the actual credit-assignment fix -- each agent's
             # gradient now reflects its own advantage.
             #
-            adv_scale = 1.0
+            adv_scale = 10.0
             actor_loss = -(
                 log_probs
                 * advantages[t].detach() * adv_scale
@@ -366,7 +368,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
         actor_objective = (
             actor_loss
-            - entropy_coef * entropy_loss
+            - self.entropy_coef * entropy_loss
         )
 
         self.actor_encoder_optimizer.zero_grad()
