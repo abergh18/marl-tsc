@@ -71,7 +71,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
       policy,
       actor_optimizer,
       critic_optimizer,
-      entropy_coef = 5e-2
+      entropy_coef = 5e-2,
       rollout_steps=64,
       gae_lambda=0.95,
 

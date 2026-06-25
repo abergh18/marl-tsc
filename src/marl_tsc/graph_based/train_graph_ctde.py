@@ -54,6 +54,7 @@ def train_graph_ctde(
     #gamma=0.99,
     gae_lambda=0.95,
     env_kwargs=None,
+    entropy_coef = 5e-2,
 ):
     """
     Train a graph-based CTDE actor-critic.
@@ -151,6 +152,7 @@ def train_graph_ctde(
             rollout_steps=rollout_steps,
             #gamma=gamma,
             gae_lambda=gae_lambda,
+            entropy_coef=entropy_coef,
         )
 
         #
