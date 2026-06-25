@@ -413,7 +413,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
         total_loss = (
             actor_loss
             + critic_loss_epoch.detach()
-            - entropy_coef * entropy_loss
+            - self.entropy_coef * entropy_loss
         )
 
         result = {
