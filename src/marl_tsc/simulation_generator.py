@@ -1,17 +1,21 @@
-"""Generate a small SUMO grid for MARL traffic-signal-control experiments."""
+"""Generate SUMO files for MARL traffic-signal-control experiments."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 import runpy
 from pathlib import Path
 import os
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
-
-DEFAULT_TRAFFIC_LIGHT_IDS = ("B1", "B2", "C1", "C2")# TODO: Extract dynamically from the net file instead of hardcoding these IDs. This is just to match the MAPPO notebook for now, but ideally the generator should be more flexible and not require manual updates to the traffic light IDs.
+from marl_tsc.network_types import (
+    DEFAULT_GRID_TRAFFIC_LIGHT_IDS,
+    DEFAULT_TRAFFIC_LIGHT_IDS,
+    GridNetwork,
+    NetworkType,
+)
 
 
 @dataclass
@@ -23,6 +27,7 @@ class SimulationPaths:
     trips_file: Path
     routes_file: Path
     config_file: Path
+    traffic_light_ids: tuple[str, ...]
 
 
 class SimulationGenerator:
@@ -33,9 +38,7 @@ class SimulationGenerator:
         trips_filename: str = "trips.trips.xml",
         routes_filename: str = "routes.rou.xml",
         config_filename: str = "config.sumocfg",
-        grid_number: int = 4,
-        lane_number: int = 1,
-        traffic_light_ids: Sequence[str] = DEFAULT_TRAFFIC_LIGHT_IDS,
+        network: NetworkType | None = None,
         trip_begin: int = 0,
         trip_end: int = 1000,
         trip_period: float = 2,
@@ -44,7 +47,7 @@ class SimulationGenerator:
         random_depart: bool = True,
         seed: int = 42,
     ) -> None:
-        """Create a SUMO grid network, traffic demand, routes, and config."""
+        """Create a SUMO network, traffic demand, routes, and config."""
 
         self.output_dir = Path(output_dir)
         self.network_filename = network_filename
@@ -52,9 +55,8 @@ class SimulationGenerator:
         self.routes_filename = routes_filename
         self.config_filename = config_filename
 
-        self.grid_number = grid_number
-        self.lane_number = lane_number
-        self.traffic_light_ids = tuple(traffic_light_ids)
+        self.network = network or GridNetwork()
+        self.traffic_light_ids: tuple[str, ...] = ()
 
         self.trip_begin = trip_begin
         self.trip_end = trip_end
@@ -141,6 +143,7 @@ class SimulationGenerator:
             trips_file=self.trips_file,
             routes_file=self.routes_file,
             config_file=self.config_file,
+            traffic_light_ids=self.traffic_light_ids,
         )
 
     def run_command(self, command: list[str]) -> None:
@@ -148,27 +151,26 @@ class SimulationGenerator:
         subprocess.run(command, check=True)
 
     def generate_network(self) -> Path:
-        """Generate the SUMO network XML file."""
+        """Generate the SUMO network XML file and detect its traffic lights."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+        self.network.generate(self.output_dir, self.network_file, self.run_command)
+        self.traffic_light_ids = self.detect_traffic_light_ids()
         if not self.traffic_light_ids:
-            raise ValueError("traffic_light_ids must contain at least one junction ID.")
+            raise ValueError(f"No traffic lights were found in {self.network_file}.")
 
-        command = [
-            "netgenerate",
-            "--grid",
-            f"--grid.number={self.grid_number}",
-            f"--default.lanenumber={self.lane_number}",
-            "--tls.layout",
-            "incoming",
-            "--tls.set",
-            ",".join(self.traffic_light_ids),
-            "-o",
-            str(self.network_file),
-        ]
-
-        self.run_command(command)
         return self.network_file
+
+    def detect_traffic_light_ids(self) -> tuple[str, ...]:
+        """Read the generated network and return its traffic-light ids."""
+        tree = ET.parse(self.network_file)
+        traffic_light_ids = []
+        for element in tree.iter():
+            if element.tag.endswith("tlLogic"):
+                traffic_light_id = element.attrib.get("id")
+                if traffic_light_id and traffic_light_id not in traffic_light_ids:
+                    traffic_light_ids.append(traffic_light_id)
+        return tuple(traffic_light_ids)
 
     def generate_trips(self) -> Path:
         """Generate trips and route files for the generated network."""
