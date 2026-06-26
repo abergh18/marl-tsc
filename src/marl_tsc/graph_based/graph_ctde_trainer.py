@@ -93,50 +93,46 @@ class GraphCTDETrainer(BaseGraphTrainer):
     def update(
         self,
         rollout_batch,
-        advantage_batch
+        advantage_batch,
     ):
 
-        advantages = advantage_batch.advantages  # (T, N)
-        returns = advantage_batch.returns        # (T, N)
+        advantages = advantage_batch.advantages
+        returns = advantage_batch.returns
 
-        # -----------------------------
-        # Value normalization, using PRE-update stats, then update
-        # the normalizer afterward (ordering fix from earlier).
         #
-        # CHANGED: returns is now (T, N) instead of (T,). The
-        # normalizer itself stays scalar (single running mean/std
-        # across all agents and timesteps combined) -- there's no
-        # need for a per-agent normalizer, since all agents share
-        # the same reward scale/distribution by construction. Only
-        # the shape of what gets normalized has changed.
-        # -----------------------------
-        '''
-        normalized_returns = (
-            returns
-            - self.value_normalizer.mean
-        ) / (
-            self.value_normalizer.std
-            + 1e-8
-        )'''
+        # -------------------------------------------------
+        # Value normalisation
+        # -------------------------------------------------
+        #
+
+        # Uncomment if using value normalisation.
+        #
+        # normalized_returns = (
+        #     returns
+        #     - self.value_normalizer.mean
+        # ) / (
+        #     self.value_normalizer.std
+        #     + 1e-8
+        # )
+
         normalized_returns = returns
 
-        # Flatten before updating the normalizer's running stats,
-        # since RunningMeanStd.update() expects a 1D array.
         self.value_normalizer.update(
             returns.flatten().cpu().numpy()
         )
 
         print(
-            f"ValueNorm mean={self.value_normalizer.mean:.3f} "
+            f"ValueNorm "
+            f"mean={self.value_normalizer.mean:.3f} "
             f"std={self.value_normalizer.std:.3f}"
         )
 
-        # CHANGED: advantage normalization now operates across the
-        # full (T, N) tensor -- mean/std computed over all agents and
-        # timesteps together. This keeps advantages on a comparable
-        # scale across agents, which matters since some agents may
-        # have systematically higher-variance local rewards than
-        # others (e.g. busier intersections).
+        #
+        # -------------------------------------------------
+        # Advantage normalisation
+        # -------------------------------------------------
+        #
+
         advantages = (
             advantages
             - advantages.mean()
@@ -153,26 +149,54 @@ class GraphCTDETrainer(BaseGraphTrainer):
             f"max={advantages.max().item():.4f}",
         )
 
-        # -----------------------------
-        # Replay observations through current network
-        # -----------------------------
+        #
+        # -------------------------------------------------
+        # Storage
+        # -------------------------------------------------
+        #
 
         actor_losses = []
         critic_losses = []
         entropy_losses = []
 
-        #entropy_coef = 55e-2
+        #
+        # Diagnostics
+        #
+
+        explained_variances = []
+
+        value_means = []
+        value_stds = []
+
+        return_means = []
+        return_stds = []
+
+        td_error_means = []
+        td_error_maxes = []
+
+        adv_scale = 10.0
+
+        #
+        # -------------------------------------------------
+        # Replay rollout
+        # -------------------------------------------------
+        #
 
         for t, graph_obs in enumerate(
             rollout_batch.observations
         ):
-            #print(f"GRAPH OBS{graph_obs}")
+
             output = self.policy(
                 graph_obs
             )
 
             if t == 0:
-                emb = output.encoder_output.node_embeddings
+
+                emb = (
+                    output
+                    .encoder_output
+                    .node_embeddings
+                )
 
                 print(
                     f"emb_mean={emb.mean().item():.4f} "
@@ -181,25 +205,33 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
                 print(
                     "first_node_emb:",
-                    emb[0][:5].detach().cpu().numpy()
+                    emb[0][:5]
+                    .detach()
+                    .cpu()
+                    .numpy(),
                 )
 
             dist = Categorical(
                 logits=output.logits
             )
+
             entropy = dist.entropy().sum()
+
+            probs = torch.softmax(
+                output.logits,
+                dim=-1,
+            )
 
             logit_gap = (
                 output.logits.max(dim=-1).values
                 - output.logits.min(dim=-1).values
             ).mean()
 
-            probs = torch.softmax(
-                output.logits,
-                dim=-1
+            max_prob = (
+                probs.max(dim=-1)
+                .values
+                .mean()
             )
-
-            max_prob = probs.max(dim=-1).values.mean()
 
             print(
                 f"entropy={entropy.item():.4f} | "
@@ -207,52 +239,102 @@ class GraphCTDETrainer(BaseGraphTrainer):
                 f"max_prob={max_prob.item():.4f}"
             )
 
-            actions = rollout_batch.actions[t]  # (N,)
+            actions = rollout_batch.actions[t]
 
-            print(
-                Counter(
-                    rollout_batch.actions.flatten().tolist()
+            if t == 0:
+                print(
+                    Counter(
+                        rollout_batch.actions
+                        .flatten()
+                        .tolist()
+                    )
                 )
-            )
-
 
             log_probs = dist.log_prob(
                 actions
-            )  # (N,)
+            )
 
-            #
-            # Actor
-            #
-            # CHANGED: per-agent advantage multiplied against each
-            # agent's own log-prob BEFORE summing, instead of summing
-            # log-probs first and multiplying by one shared scalar.
-            # This is the actual credit-assignment fix -- each agent's
-            # gradient now reflects its own advantage.
-            #
-            adv_scale = 10.0
             actor_loss = -(
                 log_probs
-                * advantages[t].detach() * adv_scale
+                * advantages[t].detach()
+                * adv_scale
             ).sum()
 
-            entropy_loss = dist.entropy().sum()
+            entropy_loss = entropy
 
-            print(
-                f"value={output.value.mean().item():.3f} "
-                f"target={normalized_returns[t].mean().item():.3f}"
+            values = (
+                output.value
+                .squeeze(-1)
+            )
+
+            targets = (
+                normalized_returns[t]
+                .detach()
+            )
+
+            critic_loss = F.mse_loss(
+                values,
+                targets,
             )
 
             #
-            # Critic
+            # ------------------------
+            # Critic diagnostics
+            # ------------------------
             #
-            # CHANGED: output.value is now (N, 1) from the per-node
-            # CriticHead. Squeeze to (N,) and compare directly against
-            # normalized_returns[t], which is also (N,) -- no more
-            # .mean() collapse needed since shapes now match natively.
-            #
-            critic_loss = F.mse_loss(
-                output.value.squeeze(-1),
-                normalized_returns[t].detach(),
+
+            with torch.no_grad():
+
+                td_error = (
+                    targets
+                    - values
+                )
+
+                value_means.append(
+                    values.mean().item()
+                )
+
+                value_stds.append(
+                    values.std().item()
+                )
+
+                return_means.append(
+                    targets.mean().item()
+                )
+
+                return_stds.append(
+                    targets.std().item()
+                )
+
+                td_error_means.append(
+                    td_error.abs().mean().item()
+                )
+
+                td_error_maxes.append(
+                    td_error.abs().max().item()
+                )
+
+                var_returns = torch.var(
+                    targets
+                )
+
+                if var_returns > 1e-8:
+
+                    ev = (
+                        1.0
+                        - torch.var(
+                            targets - values
+                        )
+                        / var_returns
+                    )
+
+                    explained_variances.append(
+                        ev.item()
+                    )
+
+            print(
+                f"value={values.mean().item():.3f} "
+                f"target={targets.mean().item():.3f}"
             )
 
             actor_losses.append(
@@ -280,12 +362,16 @@ class GraphCTDETrainer(BaseGraphTrainer):
         ).mean()
 
         #
+        # -------------------------------------------------
         # Critic updates
+        # -------------------------------------------------
         #
 
         critic_update_epochs = 5
 
-        for _ in range(critic_update_epochs):
+        for epoch in range(
+            critic_update_epochs
+        ):
 
             critic_losses_epoch = []
 
@@ -297,9 +383,16 @@ class GraphCTDETrainer(BaseGraphTrainer):
                     graph_obs
                 )
 
+                values = output.value.squeeze(-1)
+
+                targets = (
+                    normalized_returns[t]
+                    .detach()
+                )
+
                 critic_loss_t = F.mse_loss(
-                    output.value.squeeze(-1),
-                    normalized_returns[t].detach(),
+                    values,
+                    targets,
                 )
 
                 critic_losses_epoch.append(
@@ -314,6 +407,10 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
             critic_loss_epoch.backward()
 
+            critic_grad = get_grad_norm(
+                self.policy.critic_head.parameters()
+            )
+
             torch.nn.utils.clip_grad_norm_(
                 self.policy.critic_head.parameters(),
                 max_norm=0.5,
@@ -321,8 +418,19 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
             self.critic_optimizer.step()
 
+            if epoch == (
+                critic_update_epochs - 1
+            ):
+
+                print(
+                    f"critic_epoch={epoch+1} "
+                    f"loss={critic_loss_epoch.item():.4f} "
+                    f"grad={critic_grad:.4f}"
+                )
         #
-        # Recompute actor graph AFTER critic updates
+        # -------------------------------------------------
+        # Actor update
+        # -------------------------------------------------
         #
 
         actor_losses = []
@@ -368,47 +476,92 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
         actor_objective = (
             actor_loss
-            - self.entropy_coef * entropy_loss
+            - self.entropy_coef
+            * entropy_loss
         )
 
         self.actor_encoder_optimizer.zero_grad()
 
         actor_objective.backward()
 
+        encoder_grad = get_grad_norm(
+            self.policy.encoder.parameters()
+        )
+
+        actor_grad = get_grad_norm(
+            self.policy.actor_head.parameters()
+        )
+
+        print()
+
         print(
-            "encoder_grad",
-            sum(
-                p.grad.norm().item()
-                for p in self.policy.encoder.parameters()
-                if p.grad is not None
-            )
+            f"encoder_grad : {encoder_grad:.4f}"
         )
 
         print(
-            "actor_grad",
-            sum(
-                p.grad.norm().item()
-                for p in self.policy.actor_head.parameters()
-                if p.grad is not None
-            )
+            f"actor_grad   : {actor_grad:.4f}"
         )
 
         print(
-            "critic_grad",
-            sum(
-                p.grad.norm().item()
-                for p in self.policy.critic_head.parameters()
-                if p.grad is not None
-            )
+            f"critic_grad  : {critic_grad:.4f}"
         )
+
+        if explained_variances:
+
+            print(
+                f"ExplainedVar : "
+                f"{np.mean(explained_variances):.3f}"
+            )
+
+        print(
+            f"Value mean   : "
+            f"{np.mean(value_means):.3f}"
+        )
+
+        print(
+            f"Value std    : "
+            f"{np.mean(value_stds):.3f}"
+        )
+
+        print(
+            f"Return mean  : "
+            f"{np.mean(return_means):.3f}"
+        )
+
+        print(
+            f"Return std   : "
+            f"{np.mean(return_stds):.3f}"
+        )
+
+        print(
+            f"TD mean      : "
+            f"{np.mean(td_error_means):.3f}"
+        )
+
+        print(
+            f"TD max       : "
+            f"{np.max(td_error_maxes):.3f}"
+        )
+
+        print()
 
         torch.nn.utils.clip_grad_norm_(
-            list(self.policy.encoder.parameters())
-            + list(self.policy.actor_head.parameters()),
+            list(
+                self.policy.encoder.parameters()
+            )
+            + list(
+                self.policy.actor_head.parameters()
+            ),
             max_norm=0.5,
         )
 
         self.actor_encoder_optimizer.step()
+
+        #
+        # -------------------------------------------------
+        # Final losses
+        # -------------------------------------------------
+        #
 
         total_loss = (
             actor_loss
@@ -417,26 +570,106 @@ class GraphCTDETrainer(BaseGraphTrainer):
         )
 
         result = {
-            "actor_loss": float(
-                actor_loss.detach()
-            ),
-            "critic_loss": float(
-                critic_loss.detach()
-            ),
-            "entropy_loss": float(
-                entropy_loss.detach()
-            ),
-            "total_loss": float(
-                total_loss.detach()
-            ),
+            "actor_loss": actor_loss.detach().item(),
+            "critic_loss": critic_loss_epoch.detach().item(),
+            "entropy_loss": entropy_loss.detach().item(),
+            "total_loss": total_loss.detach().item(),
+
+            #
+            # Rollout statistics
+            #
             "rollout_length": len(
                 rollout_batch.observations
             ),
-            "mean_training_reward": float(
-                rollout_batch.rewards.mean()
+
+            "mean_training_reward": (
+                rollout_batch.rewards
+                .mean()
+                .item()
             ),
+
+            #
+            # Diagnostics
+            #
+            "explained_variance": (
+                float(np.mean(explained_variances))
+                if explained_variances
+                else 0.0
+            ),
+
+            "value_mean": float(
+                np.mean(value_means)
+            ),
+
+            "value_std": float(
+                np.mean(value_stds)
+            ),
+
+            "return_mean": float(
+                np.mean(return_means)
+            ),
+
+            "return_std": float(
+                np.mean(return_stds)
+            ),
+
+            "td_error_mean": float(
+                np.mean(td_error_means)
+            ),
+
+            "td_error_max": float(
+                np.max(td_error_maxes)
+            ),
+
+            "encoder_grad": encoder_grad,
+
+            "actor_grad": actor_grad,
+
+            "critic_grad": critic_grad,
         }
 
-        print("UPDATE RETURN:", result)
+        print()
+
+        print(
+            "=" * 70
+        )
+
+        print(
+            f"Reward      : "
+            f"{result['mean_training_reward']:.4f}"
+        )
+
+        print(
+            f"Actor Loss  : "
+            f"{result['actor_loss']:.4f}"
+        )
+
+        print(
+            f"Critic Loss : "
+            f"{result['critic_loss']:.4f}"
+        )
+
+        print(
+            f"Entropy     : "
+            f"{result['entropy_loss']:.4f}"
+        )
+
+        print(
+            f"ExplainedVar: "
+            f"{result['explained_variance']:.3f}"
+        )
+
+        print(
+            f"TD mean/max : "
+            f"{result['td_error_mean']:.3f}"
+            f" / "
+            f"{result['td_error_max']:.3f}"
+        )
+
+        print(
+            "=" * 70
+        )
+
+        print()
 
         return result
