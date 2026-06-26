@@ -6,6 +6,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 import random
+import re
+
 import numpy as np
 
 
@@ -298,6 +300,125 @@ def evaluate_policy(
         "mean_total_time_loss": _mean_or_zero(episode_time_losses),
         "mean_vehicle_count": _mean_or_zero(episode_vehicle_counts),
     }
+
+
+def export_policy_replay(
+    config_file,
+    traffic_light_ids,
+    policy,
+    output_dir,
+    max_steps=1000,
+    seed=42,
+    env_kwargs=None,
+    replay_name="replay",
+) -> Path:
+    """Export one fixed policy rollout as SUMO files that can be opened in sumo-gui."""
+
+    from marl_tsc.traffic_env import SumoTrafficEnv
+
+    config_file = Path(config_file)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    config_text = config_file.read_text(encoding="utf-8")
+    net_name = re.search(r'<net-file\s+value="([^"]+)"', config_text).group(1)
+    route_names = re.search(r'<route-files\s+value="([^"]+)"', config_text).group(1)
+
+    network_file = Path(net_name)
+    if not network_file.is_absolute():
+        network_file = config_file.parent / network_file
+
+    route_files = []
+    for route_name in route_names.split(","):
+        route_file = Path(route_name.strip())
+        if not route_file.is_absolute():
+            route_file = config_file.parent / route_file
+        route_files.append(route_file)
+
+    replay_network_file = output_dir / f"{replay_name}.net.xml"
+    replay_config_file = output_dir / f"{replay_name}.sumocfg"
+
+    env_options = dict(env_kwargs or {})
+    env_options.pop("render_mode", None)
+    env = SumoTrafficEnv(
+        config_file,
+        possible_agents=traffic_light_ids,
+        max_steps=max_steps,
+        seed=seed,
+        render_mode=None,
+        **env_options,
+    )
+
+    replay_phases: dict[str, list[tuple[float, str]]] = {}
+    completed_steps = 0
+    seconds_per_action = 0.0
+
+    try:
+        observations, infos = env.reset(seed=seed)
+        traci = env._import_traci()
+        agent_ids = tuple(traffic_light_ids or env.agents)
+        seconds_per_action = float(env.seconds_per_action)
+
+        for agent_id in agent_ids:
+            replay_phases[agent_id] = []
+
+        for step_index in range(max_steps):
+            if not env.agents:
+                break
+
+            actions = _actions_from_policy(policy, env, observations, step_index, infos=infos)
+            observations, _, _, truncations, infos = env.step(actions)
+            completed_steps += 1
+
+            for agent_id in agent_ids:
+                state = traci.trafficlight.getRedYellowGreenState(agent_id)
+                phases = replay_phases[agent_id]
+                if phases and phases[-1][1] == state:
+                    phases[-1] = (phases[-1][0] + seconds_per_action, state)
+                else:
+                    phases.append((seconds_per_action, state))
+
+            if truncations and all(truncations.values()):
+                break
+    finally:
+        env.close()
+
+    if completed_steps == 0:
+        raise RuntimeError("Policy replay export did not complete any simulation steps.")
+
+    net_text = network_file.read_text(encoding="utf-8")
+    for agent_id, phases in replay_phases.items():
+        phase_lines = "\n".join(
+            f'        <phase duration="{duration:g}" state="{state}"/>'
+            for duration, state in phases
+        )
+        replay_logic = (
+            f'    <tlLogic id="{agent_id}" type="static" programID="0" offset="0">\n'
+            f"{phase_lines}\n"
+            f"    </tlLogic>"
+        )
+        pattern = rf'    <tlLogic id="{re.escape(agent_id)}"[\s\S]*?    </tlLogic>'
+        net_text = re.sub(pattern, replay_logic, net_text, count=1)
+
+    replay_network_file.write_text(net_text, encoding="utf-8")
+
+    route_value = ",".join(str(route_file) for route_file in route_files)
+    replay_config_file.write_text(
+        f"""<configuration>
+    <input>
+        <net-file value="{replay_network_file.name}"/>
+        <route-files value="{route_value}"/>
+    </input>
+    <time>
+        <begin value="0"/>
+        <end value="{completed_steps * seconds_per_action:g}"/>
+    </time>
+</configuration>
+""",
+        encoding="utf-8",
+    )
+
+    return replay_config_file
 
 
 def plot_training_histories(histories):
