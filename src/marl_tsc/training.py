@@ -56,18 +56,21 @@ def _make_reward_logger_callback(algorithm_name: str):
             if self.current_returns is None and rewards is not None:
                 self.current_returns = np.zeros(len(rewards))
 
-            # Update running returns and check for finished episodes
             if rewards is not None and dones is not None:
                 self.current_returns += rewards
-                for i, done in enumerate(dones):
-                    if done:
-                        episode_return = float(self.current_returns[i])
-                        self.episode_returns.append(episode_return)
-                        self.completed_episodes += 1
-                        print(
-                            f"[{algorithm_name.upper()}] Step {self.num_timesteps} | "
-                            f"Episode Return: {episode_return:.2f}"
-                        )
+                done_indexes = [i for i, done in enumerate(dones) if done]
+                if done_indexes:
+                    completed_returns = [
+                        float(self.current_returns[i]) for i in done_indexes
+                    ]
+                    episode_return = float(np.mean(completed_returns))
+                    self.episode_returns.append(episode_return)
+                    self.completed_episodes += 1
+                    print(
+                        f"[{algorithm_name.upper()}] Step {self.num_timesteps} | "
+                        f"Network Episode Return: {episode_return:.2f}"
+                    )
+                    for i in done_indexes:
                         self.current_returns[i] = 0.0
 
             if rewards is not None:
@@ -209,8 +212,10 @@ def evaluate_policy(
     episode_switches = []
     episode_arrivals = []
     episode_waiting_times = []
+    episode_max_waiting_times = []
     episode_time_losses = []
     episode_vehicle_counts = []
+    episode_details = []
     total_completed_steps = 0
 
     for episode_index in range(episodes):
@@ -232,6 +237,7 @@ def evaluate_policy(
         switch_count = 0
         arrived_vehicles = 0
         waiting_time_sum = 0.0
+        max_waiting_time = 0.0
         time_loss_sum = 0.0
         vehicle_count_sum = 0.0
         global_metric_count = 0
@@ -250,6 +256,10 @@ def evaluate_policy(
                     queue_sum += float(info.get("mean_local_queue", 0.0))
                     queue_count += 1
                     max_queue = max(max_queue, float(info.get("max_local_queue", 0.0)))
+                    max_waiting_time = max(
+                        max_waiting_time,
+                        float(info.get("max_waiting_time", 0.0)),
+                    )
                     switch_count += 1 if info.get("switched") else 0
 
                 first_info = next(iter(infos.values()), None)
@@ -271,19 +281,34 @@ def evaluate_policy(
             f"Finished Evaluation Episode {episode_index + 1}/{episodes} - "
             f"Total Reward: {episode_reward:.2f}"
         )
+        mean_local_queue = queue_sum / queue_count if queue_count else 0.0
+        mean_waiting_time = waiting_time_sum / global_metric_count if global_metric_count else 0.0
+        mean_total_time_loss = time_loss_sum / global_metric_count if global_metric_count else 0.0
+        mean_vehicle_count = vehicle_count_sum / global_metric_count if global_metric_count else 0.0
+
         episode_rewards.append(episode_reward)
-        episode_queues.append(queue_sum / queue_count if queue_count else 0.0)
+        episode_queues.append(mean_local_queue)
         episode_max_queues.append(max_queue)
         episode_switches.append(switch_count)
         episode_arrivals.append(arrived_vehicles)
-        episode_waiting_times.append(
-            waiting_time_sum / global_metric_count if global_metric_count else 0.0
-        )
-        episode_time_losses.append(
-            time_loss_sum / global_metric_count if global_metric_count else 0.0
-        )
-        episode_vehicle_counts.append(
-            vehicle_count_sum / global_metric_count if global_metric_count else 0.0
+        episode_waiting_times.append(mean_waiting_time)
+        episode_max_waiting_times.append(max_waiting_time)
+        episode_time_losses.append(mean_total_time_loss)
+        episode_vehicle_counts.append(mean_vehicle_count)
+        episode_details.append(
+            {
+                "episode": episode_index + 1,
+                "total_reward": episode_reward,
+                "mean_local_queue": mean_local_queue,
+                "max_queue": max_queue,
+                "switches": switch_count,
+                "arrived_vehicles": arrived_vehicles,
+                "mean_waiting_time": mean_waiting_time,
+                "max_waiting_time": max_waiting_time,
+                "mean_total_time_loss": mean_total_time_loss,
+                "mean_vehicle_count": mean_vehicle_count,
+                "completed_steps": completed_steps,
+            }
         )
         total_completed_steps += completed_steps
 
@@ -297,8 +322,10 @@ def evaluate_policy(
         "mean_switches_per_episode": _mean_or_zero(episode_switches),
         "mean_arrived_vehicles_per_episode": _mean_or_zero(episode_arrivals),
         "mean_waiting_time": _mean_or_zero(episode_waiting_times),
+        "mean_max_waiting_time": _mean_or_zero(episode_max_waiting_times),
         "mean_total_time_loss": _mean_or_zero(episode_time_losses),
         "mean_vehicle_count": _mean_or_zero(episode_vehicle_counts),
+        "episode_details": episode_details,
     }
 
 
@@ -456,6 +483,40 @@ def plot_training_histories(histories):
         ax.legend()
     fig.tight_layout()
     return fig, ax
+
+
+def plot_evaluation_results(policy_results):
+    """Plot per-episode evaluation reward, queue, waiting time, and switches."""
+
+    import matplotlib.pyplot as plt
+
+    metrics = [
+        ("total_reward", "Reward"),
+        ("mean_local_queue", "Mean queue"),
+        ("mean_waiting_time", "Mean waiting time"),
+        ("max_waiting_time", "Max waiting time"),
+        ("switches", "Switches"),
+    ]
+    fig, axes = plt.subplots(3, 2, figsize=(10, 9))
+
+    for ax, (metric, title) in zip(axes.ravel(), metrics):
+        for policy_name, result in policy_results.items():
+            details = result.get("episode_details", [])
+            if not details:
+                continue
+            episodes = [item["episode"] for item in details]
+            values = [item[metric] for item in details]
+            ax.plot(episodes, values, marker="o", label=policy_name)
+        ax.set_title(title)
+        ax.set_xlabel("Evaluation episode")
+        ax.grid(alpha=0.25)
+
+    for ax in axes.ravel()[len(metrics):]:
+        ax.axis("off")
+
+    axes[0, 0].legend()
+    fig.tight_layout()
+    return fig, axes
 
 
 def plot_moving_average_histories(histories, window=100):

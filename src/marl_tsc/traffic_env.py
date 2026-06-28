@@ -67,6 +67,8 @@ class SumoTrafficEnv(ParallelEnv):
         self._elapsed_green_seconds: dict[str, float] = {}
         self._switched_last_step: dict[str, bool] = {}
         self._latest_lane_queues: dict[str, list[int]] = {}
+        self._latest_max_waiting_times: dict[str, float] = {}
+        self._previous_mean_local_queue: dict[str, float] = {}
         self._last_arrived_vehicles = 0
         self._last_mean_waiting_time = 0.0
         self._last_total_time_loss = 0.0
@@ -196,6 +198,8 @@ class SumoTrafficEnv(ParallelEnv):
         self._elapsed_green_seconds = {}
         self._switched_last_step = {}
         self._latest_lane_queues = {}
+        self._latest_max_waiting_times = {}
+        self._previous_mean_local_queue = {}
         self._last_arrived_vehicles = 0
         self._last_mean_waiting_time = 0.0
         self._last_total_time_loss = 0.0
@@ -237,6 +241,8 @@ class SumoTrafficEnv(ParallelEnv):
             self._elapsed_green_seconds[tls_id] = 0.0
             self._switched_last_step[tls_id] = False
             self._latest_lane_queues[tls_id] = []
+            self._latest_max_waiting_times[tls_id] = 0.0
+            self._previous_mean_local_queue[tls_id] = 0.0
             traci.trafficlight.setPhase(tls_id, green_phases[0])
 
     def observation_space(self, agent: str) -> Box:
@@ -371,14 +377,16 @@ class SumoTrafficEnv(ParallelEnv):
     def _reward_for_agent(self, agent: str) -> float:
         """Computes the reward for an agent based on local traffic metrics.
 
-        The default implementation penalizes high queue lengths and phase
-        switches to encourage stability and flow.
+        Positive reward means the local queue got shorter since the last step.
+        Remaining queue, long waits, and phase switches are small penalties.
         """
-        _, mean_local_queue, max_local_queue = self._local_queue_stats(agent)
+        _, mean_local_queue, _ = self._local_queue_stats(agent)
+        previous_queue = self._previous_mean_local_queue.get(agent, mean_local_queue)
+        queue_improvement = previous_queue - mean_local_queue
+        longest_wait = self._latest_max_waiting_times.get(agent, 0.0)
         switched = self._switched_last_step.get(agent, False)
-        penalty = self.switch_penalty if switched else 0.0
-        queue_penalty = 0.8 * mean_local_queue + 0.2 * max_local_queue
-        return (-queue_penalty - penalty) * 0.1
+        switch_cost = self.switch_penalty if switched else 0.0
+        return queue_improvement - 0.1 * mean_local_queue - 0.02 * longest_wait - switch_cost
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
@@ -387,6 +395,10 @@ class SumoTrafficEnv(ParallelEnv):
         self._discover_agents_and_lanes()
 
         observations = self._get_obs()
+        for agent in self.agents:
+            _, mean_local_queue, _ = self._local_queue_stats(agent)
+            self._previous_mean_local_queue[agent] = mean_local_queue
+
         infos = {agent: {"action_mask": self.action_mask(agent)} for agent in self.agents}
         return observations, infos
 
@@ -472,6 +484,15 @@ class SumoTrafficEnv(ParallelEnv):
             self._latest_lane_queues[agent] = [
                 traci.lane.getLastStepHaltingNumber(lane_id) for lane_id in lane_ids
             ]
+            waiting_times = []
+            for lane_id in lane_ids:
+                waiting_times.extend(
+                    traci.vehicle.getWaitingTime(vehicle_id)
+                    for vehicle_id in traci.lane.getLastStepVehicleIDs(lane_id)
+                )
+            self._latest_max_waiting_times[agent] = (
+                float(max(waiting_times)) if waiting_times else 0.0
+            )
 
         observations = self._get_obs()
         rewards = {agent: self._reward_for_agent(agent) for agent in self.agents}
@@ -492,6 +513,7 @@ class SumoTrafficEnv(ParallelEnv):
                 "local_queue": local_queue,
                 "mean_local_queue": mean_local_queue,
                 "max_local_queue": max_local_queue,
+                "max_waiting_time": self._latest_max_waiting_times.get(agent, 0.0),
                 "switched": self._switched_last_step.get(agent, False),
                 "current_action": current_action,
                 "min_green_satisfied": self._min_green_satisfied(agent),
@@ -502,6 +524,7 @@ class SumoTrafficEnv(ParallelEnv):
                 "total_time_loss": self._last_total_time_loss,
                 "global_metrics_updated": global_metrics_updated,
             }
+            self._previous_mean_local_queue[agent] = mean_local_queue
 
         if truncated:
             self.agents = []

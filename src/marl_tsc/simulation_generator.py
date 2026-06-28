@@ -10,12 +10,7 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
-from marl_tsc.network_types import (
-    DEFAULT_GRID_TRAFFIC_LIGHT_IDS,
-    DEFAULT_TRAFFIC_LIGHT_IDS,
-    GridNetwork,
-    NetworkType,
-)
+from marl_tsc.network_types import GridNetwork, NetworkType
 
 
 @dataclass

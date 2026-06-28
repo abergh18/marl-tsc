@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 from pathlib import Path
+from string import ascii_uppercase
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-DEFAULT_GRID_TRAFFIC_LIGHT_IDS = ("B1", "B2", "C1", "C2")
-DEFAULT_TRAFFIC_LIGHT_IDS = DEFAULT_GRID_TRAFFIC_LIGHT_IDS
 RunCommand = Callable[[list[str]], None]
 
 
@@ -26,6 +25,7 @@ class NetworkType(ABC):
         network_file: Path,
         run_command: RunCommand,
     ) -> None:
+        """Create network_file inside output_dir."""
 
 
 @dataclass
@@ -34,7 +34,18 @@ class GridNetwork(NetworkType):
 
     grid_number: int = 4
     lane_number: int = 2
-    traffic_light_ids: Sequence[str] = DEFAULT_GRID_TRAFFIC_LIGHT_IDS
+
+    def _traffic_light_ids(self) -> tuple[str, ...]:
+        if self.grid_number < 3:
+            raise ValueError("grid_number must be at least 3 to have internal traffic lights.")
+        if self.grid_number > len(ascii_uppercase):
+            raise ValueError("grid_number is too large for the simple A-Z grid naming scheme.")
+
+        return tuple(
+            f"{ascii_uppercase[column]}{row}"
+            for column in range(1, self.grid_number - 1)
+            for row in range(1, self.grid_number - 1)
+        )
 
     def generate(
         self,
@@ -42,10 +53,6 @@ class GridNetwork(NetworkType):
         network_file: Path,
         run_command: RunCommand,
     ) -> None:
-        traffic_light_ids = tuple(self.traffic_light_ids)
-        if not traffic_light_ids:
-            raise ValueError("traffic_light_ids must contain at least one junction ID.")
-
         run_command(
             [
                 "netgenerate",
@@ -55,7 +62,7 @@ class GridNetwork(NetworkType):
                 "--tls.layout",
                 "incoming",
                 "--tls.set",
-                ",".join(traffic_light_ids),
+                ",".join(self._traffic_light_ids()),
                 "-o",
                 str(network_file),
             ]
@@ -67,7 +74,7 @@ class CityNetwork(NetworkType):
     """A small UK city network downloaded from OpenStreetMap."""
 
     city_name: str = "Bristol, UK"
-    radius: int = 500
+    radius: int = 150
     lane_number: int = 2
     left_hand: bool = True
 

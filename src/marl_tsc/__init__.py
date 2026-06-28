@@ -4,8 +4,6 @@ from importlib import import_module
 
 __all__ = [
     "CityNetwork",
-    "DEFAULT_GRID_TRAFFIC_LIGHT_IDS",
-    "DEFAULT_TRAFFIC_LIGHT_IDS",
     "GridNetwork",
     "NetworkType",
     "SimulationGenerator",
@@ -21,8 +19,6 @@ def __getattr__(name):
 
     if name in {
         "CityNetwork",
-        "DEFAULT_GRID_TRAFFIC_LIGHT_IDS",
-        "DEFAULT_TRAFFIC_LIGHT_IDS",
         "GridNetwork",
         "NetworkType",
     }:
