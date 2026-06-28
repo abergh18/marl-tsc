@@ -68,54 +68,45 @@ class AdvantageEstimator:
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
     ) -> AdvantageBatch:
-        """
-        Parameters
-        ----------
-        bootstrap_value : torch.Tensor, shape (N,)
-            The critic's value estimate for the state immediately
-            following the last transition in this rollout. Pass a
-            zero tensor only if you are certain the rollout's final
-            transition is a genuine terminal state (dones[-1] == 1).
-            Otherwise this MUST be a real value estimate, or the
-            recursion will systematically underestimate returns for
-            rollouts that end mid-episode (truncation, not
-            termination).
-        """
 
         rewards = rollout_batch.rewards  # (T, N)
-        values = rollout_batch.values    # (T, N) -- per-node critic outputs
+        values = rollout_batch.values    # (T, N)
         dones = rollout_batch.dones      # (T,)
 
         num_agents = rewards.shape[1]
+        device = values.device
 
-        advantages = torch.zeros_like(rewards)  # (T, N)
+        # 1. Prepare tracking tensors directly on the correct device
+        advantages = torch.zeros_like(rewards, device=device)
+        gae = torch.zeros(num_agents, dtype=torch.float32, device=device)
 
-        gae = torch.zeros(num_agents)  # (N,)
+        # 2. Safely cast inputs to the policy device
+        if isinstance(rewards, torch.Tensor):
+            rewards = rewards.clone().detach().to(device)
+        else:
+            rewards = torch.tensor(rewards, dtype=torch.float32, device=device)
+            
+        dones = dones.to(device)
+        next_value = bootstrap_value.to(device)
 
-        # CHANGED: seed with the real bootstrap value, not zero.
-        # If dones[-1] == 1 (genuine terminal state), the mask in the
-        # first loop iteration below will zero out this term anyway,
-        # so passing a real value is always safe regardless of
-        # whether the last step happened to be terminal or truncated.
-        next_value = bootstrap_value  # (N,)
-        amp = 1#0 #2.5
+        amp = 1
+
         for t in reversed(range(len(rewards))):
-            mask = 1.0 - dones[t]  # scalar, broadcasts against (N,)
-          
+            mask = 1.0 - dones[t]  # Now safely on GPU, broadcasts perfectly
+
             delta = (
-                amp * rewards[t]                   # (N,)
-                + gamma * next_value * mask   # (N,)
-                - values[t]                   # (N,)
+                amp * rewards[t]
+                + gamma * next_value * mask
+                - values[t]
             )
 
-            gae = delta + gamma * gae_lambda * mask * gae  # (N,)
+            gae = delta + gamma * gae_lambda * mask * gae
 
             advantages[t] = gae
+            next_value = values[t]
 
-            next_value = values[t]  # (N,)
-
-        returns = advantages + values  # (T, N)
-
+        returns = advantages + values
+        
         return AdvantageBatch(
             advantages=advantages,
             returns=returns,

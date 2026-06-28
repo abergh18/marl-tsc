@@ -142,6 +142,14 @@ class GraphMAPPOTrainer(BaseGraphTrainer):
                 logits = output.logits  # (num_agents, action_dim)
                 values = output.value.squeeze(-1)  # (num_agents,)
 
+                
+                # Inside graph_mappo_trainer.py -> update()
+                # Right before the policy update loop or right before dist.log_prob:
+                actions = actions.to(logits.device) 
+
+                dist = Categorical(logits=logits)
+                new_log_probs = dist.log_prob(actions)
+                
                 # Policy update
                 dist = Categorical(logits=logits)
                 new_log_probs = dist.log_prob(actions)
