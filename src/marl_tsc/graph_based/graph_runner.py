@@ -49,6 +49,7 @@ from dataclasses import dataclass
 import torch
 import numpy as np
 from torch.distributions import Categorical
+from torch_geometric.data import Data
 
 
 @dataclass
@@ -93,6 +94,31 @@ class GraphRunner:
         # right after the most recently collected rollout.
         self.last_observation = None
 
+    def _move_graph_obs_to_device(self, graph_obs):
+        """
+        Move graph observation tensors to the policy's device.
+
+        GraphTrafficEnv returns observations on CPU. The policy may be on GPU.
+        This method moves graph_obs.graph (a torch_geometric.data.Data object)
+        to the same device as the policy.
+        """
+        device = next(self.policy.parameters()).device
+
+        # Move node features and edge indices to device
+        graph = Data(
+            x=graph_obs.graph.x.to(device),
+            edge_index=graph_obs.graph.edge_index.to(device),
+        )
+
+        # Recreate GraphObservation with moved tensors
+        from marl_tsc.graph_based.graph_types import GraphObservation
+
+        return GraphObservation(
+            graph=graph,
+            agent_ids=graph_obs.agent_ids,
+            metadata=graph_obs.metadata,
+        )
+
     def collect_rollout(
         self,
         num_steps: int,
@@ -115,8 +141,13 @@ class GraphRunner:
         infos = self._current_infos
 
         for _ in range(num_steps):
-            policy_output = self.policy(
+            # Move graph observation to policy device
+            graph_obs_device = self._move_graph_obs_to_device(
                 graph_obs
+            )
+
+            policy_output = self.policy(
+                graph_obs_device
             )
 
             masks = np.stack(
@@ -173,7 +204,7 @@ class GraphRunner:
 
             rollout.append(
                 Transition(
-                    observation=graph_obs,
+                    observation=graph_obs_device,
                     action_dict=action_dict,
                     log_prob=log_probs.detach(),
                     logits=policy_output.logits.detach(),
@@ -198,6 +229,8 @@ class GraphRunner:
         # post-rollout observation for the GAE bootstrap fetch.
         self._current_obs = graph_obs
         self._current_infos = infos
-        self.last_observation = graph_obs
+        self.last_observation = self._move_graph_obs_to_device(
+            graph_obs
+        )
 
         return rollout
