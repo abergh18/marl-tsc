@@ -12,6 +12,7 @@ Typical usage:
         output_dir=OUTPUT_DIR,
         total_timesteps=100_000,
     )
+
 """
 
 from __future__ import annotations
@@ -139,7 +140,6 @@ def train_graph_mappo(
         model_path=str(
             Path(output_dir) / "models" / "graph_mappo.pt"
         ),
-        policy=policy,
     )
 
     return model, history, model_path
