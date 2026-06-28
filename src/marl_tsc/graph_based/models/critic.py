@@ -16,9 +16,13 @@ class CriticHead(nn.Module):
         input_dim = embedding_dim * 2
 
         self.value = nn.Sequential(
-            nn.Linear(input_dim, 64),
+            nn.Linear(input_dim, 128),
             nn.ReLU(),
-            nn.Linear(64, 1),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
         )
 
     def forward(
@@ -56,3 +60,10 @@ class CriticHead(nn.Module):
       return self.value(
           critic_input
       )
+    '''def forward(self, encoder_output):
+      # CHANGED: use node_embeddings (per-node), not graph_embedding
+      # (pooled). Output shape: (num_nodes, 1) -> squeeze handled by
+      # caller, matching ActorHead's convention.
+      return self.value(
+          encoder_output.node_embeddings
+      )'''
