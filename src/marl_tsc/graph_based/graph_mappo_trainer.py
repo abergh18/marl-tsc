@@ -144,7 +144,7 @@ class GraphMAPPOTrainer(BaseGraphTrainer):
 
                 
                 # Inside graph_mappo_trainer.py -> update()
-                # Right before the policy update loop or right before dist.log_prob:
+                # Convert before the new logs update
                 actions = actions.to(logits.device) 
 
                 dist = Categorical(logits=logits)
@@ -208,7 +208,7 @@ class GraphMAPPOTrainer(BaseGraphTrainer):
             "actor_loss": float(
                 torch.stack(actor_losses).mean()
             ),
-            "value_loss": float(
+            "critic_loss": float(
                 torch.stack(value_losses).mean()
             ),
             "entropy_loss": float(
