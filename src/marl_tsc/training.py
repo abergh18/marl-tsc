@@ -105,13 +105,16 @@ def train_ppo(
 
     env_options = dict(env_kwargs or {})
     env_options.setdefault("collect_global_metrics", False)
-    env = SumoTrafficEnv(
-        config_file,
-        possible_agents=traffic_light_ids,
-        max_steps=max_steps,
-        seed=seed,
-        **env_options,
-    )
+if traffic_light_ids is None:
+    traffic_light_ids = GraphBuilder(paths.network_file).build().agent_ids
+
+env = SumoTrafficEnv(
+    config_file,
+    possible_agents=traffic_light_ids,
+    max_steps=max_steps,
+    seed=seed,
+    **env_options,
+)
 
     vec_env = _make_vec_env(env)
     model = PPO(
