@@ -97,49 +97,52 @@ def train_graph_mappo(
         network_file=network_file,
         possible_agents=traffic_light_ids,
     )
+    try:
+      graph_obs, infos = env.reset()
+      obs_dim = env.obs_dim
+      agent_ids = env.agent_ids
+      action_dim = int(env.action_spaces[agent_ids[0]].n)
 
-    graph_obs, infos = env.reset()
-    obs_dim = env.obs_dim
-    agent_ids = env.agent_ids
-    action_dim = int(env.action_spaces[agent_ids[0]].n)
+      # Build policy
+      policy = build_default_graph_policy(
+          obs_dim=obs_dim,
+          action_dim=action_dim,
+          hidden_dim=64,
+      ).to(device)
 
-    # Build policy
-    policy = build_default_graph_policy(
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        hidden_dim=64,
-    ).to(device)
+      # Create optimizer
+      optimizer = torch.optim.Adam(
+          policy.parameters(),
+          lr=learning_rate,
+      )
 
-    # Create optimizer
-    optimizer = torch.optim.Adam(
-        policy.parameters(),
-        lr=learning_rate,
-    )
+      # Create trainer
+      trainer = GraphMAPPOTrainer(
+          env=env,
+          policy=policy,
+          optimizer=optimizer,
+          rollout_steps=rollout_steps,
+          gae_lambda=0.95,
+          gamma=0.99,
+          clip_ratio=clip_ratio,
+          entropy_coef=entropy_coef,
+          value_coef=value_coef,
+          max_grad_norm=0.5,
+          update_epochs=update_epochs,
+      )
 
-    # Create trainer
-    trainer = GraphMAPPOTrainer(
-        env=env,
-        policy=policy,
-        optimizer=optimizer,
-        rollout_steps=rollout_steps,
-        gae_lambda=0.95,
-        gamma=0.99,
-        clip_ratio=clip_ratio,
-        entropy_coef=entropy_coef,
-        value_coef=value_coef,
-        max_grad_norm=0.5,
-        update_epochs=update_epochs,
-    )
+      # Run training
+      model, history, model_path = run_training(
+          trainer=trainer,
+          total_timesteps=total_timesteps,
+          rollout_steps=rollout_steps,
+          algorithm_name="graph_mappo",
+          model_path=str(
+              Path(output_dir) / "models" / "graph_mappo.pt"
+          ),
+      )
 
-    # Run training
-    model, history, model_path = run_training(
-        trainer=trainer,
-        total_timesteps=total_timesteps,
-        rollout_steps=rollout_steps,
-        algorithm_name="graph_mappo",
-        model_path=str(
-            Path(output_dir) / "models" / "graph_mappo.pt"
-        ),
-    )
-
-    return model, history, model_path
+      return model, history, model_path
+    
+    finally:
+      env.close()
