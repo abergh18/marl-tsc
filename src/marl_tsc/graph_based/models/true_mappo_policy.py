@@ -113,7 +113,7 @@ class GraphMAPPOPolicy(nn.Module):
         MAPPOPolicyOutput
         """
         # Actor: local graph embeddings, identical to GraphPolicy
-        encoder_output = self.encoder(graph_obs.graph)          # (num_agents, hidden_dim)
+        encoder_output = self.encoder(graph_obs)          # (num_agents, hidden_dim)
         logits = self.actor_head(encoder_output)                 # (num_agents, action_dim)
 
         # Critic: centralised, sees full global state

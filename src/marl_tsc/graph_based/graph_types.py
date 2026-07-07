@@ -49,6 +49,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import torch
+
 
 @dataclass
 class GraphObservation:
@@ -64,6 +66,11 @@ class GraphObservation:
     agent_ids
         Ordered list of controllable agents represented within the graph.
 
+    global_state
+        Flat tensor of shape (num_agents * obs_dim,) containing all agent
+        observations concatenated. Used by the centralised critic in true
+        MAPPO. None for algorithms that do not require global state.
+
     metadata
         Optional auxiliary information associated with the graph.
         Future implementations may store node-type mappings,
@@ -72,5 +79,5 @@ class GraphObservation:
 
     graph: object
     agent_ids: list[str]
-
+    global_state: torch.Tensor | None = None
     metadata: dict = field(default_factory=dict)

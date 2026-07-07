@@ -37,7 +37,7 @@ from marl_tsc.graph_based.models.graph_policy import (
     GraphPolicy,
 )
 
-from marl_tsc.graph_based.true_mappo_policy import (
+from marl_tsc.graph_based.models.true_mappo_policy import (
     CentralisedCritic,
     GraphMAPPOPolicy,
 )
@@ -103,16 +103,16 @@ def build_default_graph_mappo_policy(
     # Reuse the same encoder and actor_head constructors as the existing
     # build_default_graph_policy — copy those lines here verbatim so this
     # function is self-contained and doesn't depend on the other builder.
-    from marl_tsc.graph_based.models.graph_encoder import GraphEncoder
-    from marl_tsc.graph_based.models.actor_head import ActorHead
+    from marl_tsc.graph_based.encoders.gat_encoder import GATEncoder
+    from marl_tsc.graph_based.models.actor import ActorHead
 
-    encoder = GraphEncoder(
-        in_channels=obs_dim,
+    encoder = GATEncoder(
+        obs_dim=obs_dim,
         hidden_dim=hidden_dim,
     )
 
     actor_head = ActorHead(
-        in_dim=hidden_dim,
+        embedding_dim=hidden_dim,
         action_dim=action_dim,
     )
 
