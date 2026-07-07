@@ -41,7 +41,11 @@ class MAPPOPolicyOutput:
     logits: Tensor          # (num_agents, action_dim)  — actor output
     global_value: Tensor    # (1,)                      — centralised V(s)
     encoder_output: Tensor  # (num_agents, hidden_dim)  — for inspection/logging
-
+    value: Tensor = None
+    
+    def value(self) -> Tensor:
+        """Alias for global_value — keeps GraphRunner compatible."""
+        return self.global_value
 
 # ── Centralised critic ───────────────────────────────────────────────────────
 
@@ -120,9 +124,10 @@ class GraphMAPPOPolicy(nn.Module):
         global_value = self.centralised_critic(
             graph_obs.global_state                               # (num_agents * obs_dim,)
         )                                                        # (1,)
-
+        num_agents = graph_obs.graph.x.shape[0]
         return MAPPOPolicyOutput(
             logits=logits,
             global_value=global_value,
             encoder_output=encoder_output,
+            value=global_value.expand(num_agents),
         )

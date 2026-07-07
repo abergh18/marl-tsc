@@ -116,6 +116,7 @@ class GraphRunner:
         return GraphObservation(
             graph=graph,
             agent_ids=graph_obs.agent_ids,
+            global_state=graph_obs.global_state.to(device) if graph_obs.global_state is not None else None,
             metadata=graph_obs.metadata,
         )
 
