@@ -50,6 +50,7 @@ class GraphPolicyAdapter:
                 edge_index=edge_index,
             ),
             agent_ids=self.topology.agent_ids,
+            global_state=x.flatten(),
         )
 
         output = self.policy(
