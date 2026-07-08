@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections import Counter
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
-from collections import Counter
 
 from .base_trainer import BaseGraphTrainer
 
@@ -18,6 +19,7 @@ def get_grad_norm(parameters):
         torch.stack([torch.norm(p.grad.detach(), 2) for p in parameters]), 2
     )
     return total_norm.item()
+
 
 class RunningMeanStd:
 
@@ -67,23 +69,19 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
     def __init__(
         self,
-      env,
-      policy,
-      actor_optimizer,
-      critic_optimizer,
-      entropy_coef = 5e-2
-      rollout_steps=64,
-      gae_lambda=0.95,
-
+        env,
+        policy,
+        actor_optimizer,
+        critic_optimizer,
+        entropy_coef=5e-2,
+        rollout_steps=64,
+        gae_lambda=0.95,
     ):
         super().__init__(
             env=env,
             policy=policy,
-            #optimizer=optimizer,
             rollout_steps=rollout_steps,
             gae_lambda=gae_lambda,
-            #actor_optimizer = actor_optimizer,
-            #critic_optimizer = critic_optimizer
         )
         self.value_normalizer = RunningMeanStd()
         self.actor_encoder_optimizer = actor_optimizer
@@ -99,29 +97,9 @@ class GraphCTDETrainer(BaseGraphTrainer):
         advantages = advantage_batch.advantages  # (T, N)
         returns = advantage_batch.returns        # (T, N)
 
-        # -----------------------------
-        # Value normalization, using PRE-update stats, then update
-        # the normalizer afterward (ordering fix from earlier).
-        #
-        # CHANGED: returns is now (T, N) instead of (T,). The
-        # normalizer itself stays scalar (single running mean/std
-        # across all agents and timesteps combined) -- there's no
-        # need for a per-agent normalizer, since all agents share
-        # the same reward scale/distribution by construction. Only
-        # the shape of what gets normalized has changed.
-        # -----------------------------
-        '''
-        normalized_returns = (
-            returns
-            - self.value_normalizer.mean
-        ) / (
-            self.value_normalizer.std
-            + 1e-8
-        )'''
         normalized_returns = returns
 
-        # Flatten before updating the normalizer's running stats,
-        # since RunningMeanStd.update() expects a 1D array.
+        # Flatten before updating the normalizer's running stats
         self.value_normalizer.update(
             returns.flatten().cpu().numpy()
         )
@@ -131,12 +109,6 @@ class GraphCTDETrainer(BaseGraphTrainer):
             f"std={self.value_normalizer.std:.3f}"
         )
 
-        # CHANGED: advantage normalization now operates across the
-        # full (T, N) tensor -- mean/std computed over all agents and
-        # timesteps together. This keeps advantages on a comparable
-        # scale across agents, which matters since some agents may
-        # have systematically higher-variance local rewards than
-        # others (e.g. busier intersections).
         advantages = (
             advantages
             - advantages.mean()
@@ -161,127 +133,73 @@ class GraphCTDETrainer(BaseGraphTrainer):
         critic_losses = []
         entropy_losses = []
 
-        #entropy_coef = 55e-2
-
         for t, graph_obs in enumerate(
             rollout_batch.observations
         ):
-            #print(f"GRAPH OBS{graph_obs}")
             output = self.policy(
                 graph_obs
             )
 
             if t == 0:
                 emb = output.encoder_output.node_embeddings
-
                 print(
                     f"emb_mean={emb.mean().item():.4f} "
                     f"emb_std={emb.std().item():.4f}"
                 )
-
                 print(
                     "first_node_emb:",
                     emb[0][:5].detach().cpu().numpy()
                 )
 
-            dist = Categorical(
-                logits=output.logits
-            )
-            entropy = dist.entropy().sum()
+            # Unpack the two separate sets of logits
+            traffic_logits, sharing_logits = output.logits
 
-            logit_gap = (
-                output.logits.max(dim=-1).values
-                - output.logits.min(dim=-1).values
-            ).mean()
+            # Create distributions for both actions
+            dist_traffic = Categorical(logits=traffic_logits)
+            dist_sharing = Categorical(logits=sharing_logits)
 
-            probs = torch.softmax(
-                output.logits,
-                dim=-1
-            )
+            # Sum the entropy of both branches
+            entropy = dist_traffic.entropy().sum() + dist_sharing.entropy().sum()
 
-            max_prob = probs.max(dim=-1).values.mean()
+            # Separate actions from the rollout batch (traffic is index 0, sharing is index 1)
+            traffic_actions = rollout_batch.actions[t][:, 0]
+            sharing_actions = rollout_batch.actions[t][:, 1]
 
-            print(
-                f"entropy={entropy.item():.4f} | "
-                f"logit_gap={logit_gap.item():.4f} | "
-                f"max_prob={max_prob.item():.4f}"
+            # Calculate and sum the log probabilities for both actions
+            log_probs = (
+                dist_traffic.log_prob(traffic_actions)
+                + dist_sharing.log_prob(sharing_actions)
             )
 
-            actions = rollout_batch.actions[t]  # (N,)
-
-            print(
-                Counter(
-                    rollout_batch.actions.flatten().tolist()
-                )
-            )
-
-
-            log_probs = dist.log_prob(
-                actions
-            )  # (N,)
-
-            #
-            # Actor
-            #
-            # CHANGED: per-agent advantage multiplied against each
-            # agent's own log-prob BEFORE summing, instead of summing
-            # log-probs first and multiplying by one shared scalar.
-            # This is the actual credit-assignment fix -- each agent's
-            # gradient now reflects its own advantage.
-            #
             adv_scale = 10.0
             actor_loss = -(
                 log_probs
                 * advantages[t].detach() * adv_scale
             ).sum()
 
-            entropy_loss = dist.entropy().sum()
+            entropy_loss = entropy
 
             print(
                 f"value={output.value.mean().item():.3f} "
                 f"target={normalized_returns[t].mean().item():.3f}"
             )
 
-            #
-            # Critic
-            #
-            # CHANGED: output.value is now (N, 1) from the per-node
-            # CriticHead. Squeeze to (N,) and compare directly against
-            # normalized_returns[t], which is also (N,) -- no more
-            # .mean() collapse needed since shapes now match natively.
-            #
             critic_loss = F.mse_loss(
                 output.value.squeeze(-1),
                 normalized_returns[t].detach(),
             )
 
-            actor_losses.append(
-                actor_loss
-            )
+            actor_losses.append(actor_loss)
+            critic_losses.append(critic_loss)
+            entropy_losses.append(entropy_loss)
 
-            critic_losses.append(
-                critic_loss
-            )
+        actor_loss = torch.stack(actor_losses).mean()
+        critic_loss = torch.stack(critic_losses).mean()
+        entropy_loss = torch.stack(entropy_losses).mean()
 
-            entropy_losses.append(
-                entropy_loss
-            )
-
-        actor_loss = torch.stack(
-            actor_losses
-        ).mean()
-
-        critic_loss = torch.stack(
-            critic_losses
-        ).mean()
-
-        entropy_loss = torch.stack(
-            entropy_losses
-        ).mean()
-
-        #
+        # -----------------------------
         # Critic updates
-        #
+        # -----------------------------
 
         critic_update_epochs = 5
 
@@ -321,9 +239,9 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
             self.critic_optimizer.step()
 
-        #
+        # -----------------------------
         # Recompute actor graph AFTER critic updates
-        #
+        # -----------------------------
 
         actor_losses = []
         entropy_losses = []
@@ -336,12 +254,19 @@ class GraphCTDETrainer(BaseGraphTrainer):
                 graph_obs
             )
 
-            dist = Categorical(
-                logits=output.logits
-            )
+            # Unpack logits and create distributions
+            traffic_logits, sharing_logits = output.logits
+            dist_traffic = Categorical(logits=traffic_logits)
+            dist_sharing = Categorical(logits=sharing_logits)
 
-            log_probs = dist.log_prob(
-                rollout_batch.actions[t]
+            # Separate actions
+            traffic_actions = rollout_batch.actions[t][:, 0]
+            sharing_actions = rollout_batch.actions[t][:, 1]
+
+            # Calculate and sum the log probabilities
+            log_probs = (
+                dist_traffic.log_prob(traffic_actions)
+                + dist_sharing.log_prob(sharing_actions)
             )
 
             actor_loss_t = -(
@@ -354,8 +279,9 @@ class GraphCTDETrainer(BaseGraphTrainer):
                 actor_loss_t
             )
 
+            # Sum the entropies for both actions
             entropy_losses.append(
-                dist.entropy().sum()
+                dist_traffic.entropy().sum() + dist_sharing.entropy().sum()
             )
 
         actor_loss = torch.stack(
@@ -410,10 +336,11 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
         self.actor_encoder_optimizer.step()
 
+        # Use entropy_coef from class instance to avoid unresolved variable errors
         total_loss = (
             actor_loss
             + critic_loss_epoch.detach()
-            - entropy_coef * entropy_loss
+            - self.entropy_coef * entropy_loss
         )
 
         result = {
