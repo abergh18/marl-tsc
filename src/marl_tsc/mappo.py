@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
+from marl_tsc.wrappers import PeerRewardingWrapper
 import numpy as np
 
 
@@ -196,7 +196,8 @@ def train_mappo(
         seed=seed,
         **env_options,
     )
-
+    # Apply peer rewarding for MAPPO training
+    env = PeerRewardingWrapper(env, division=10)
     observations, infos = env.reset(seed=seed)
     agent_ids = tuple(traffic_light_ids or env.agents)
     if not agent_ids:
