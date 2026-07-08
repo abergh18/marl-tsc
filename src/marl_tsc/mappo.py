@@ -205,7 +205,7 @@ def train_mappo(
         raise ValueError("traffic_light_ids must contain at least one agent.")
 
     obs_dim = int(np.asarray(observations[agent_ids[0]], dtype=np.float32).shape[0])
-    action_dim = int(env.action_space(agent_ids[0]).n)
+    action_dims = env.action_space(agent_ids[0]).nvec.tolist()
     num_agents = len(agent_ids)
     hidden_size = 128
     critic_hidden_size = 256
