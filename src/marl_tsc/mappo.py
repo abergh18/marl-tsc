@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from marl_tsc.wrappers import PeerRewardingWrapper
+
 import numpy as np
+from marl_tsc.wrappers import PeerRewardingWrapper
 
 
 def _stack_agent_observations(
@@ -18,18 +19,18 @@ def _stack_agent_observations(
 def _stack_agent_masks(
     infos: dict[str, dict] | None,
     agent_ids: tuple[str, ...],
-    action_dim: int,
+    total_action_dim: int,
 ) -> np.ndarray:
-    """Build a (num_agents, action_dim) mask from infos; default to all-ones if absent."""
+    """Build a (num_agents, total_action_dim) mask from infos."""
     if not infos:
-        return np.ones((len(agent_ids), action_dim), dtype=np.float32)
+        return np.ones((len(agent_ids), total_action_dim), dtype=np.float32)
 
     rows = []
     for agent in agent_ids:
         info = infos.get(agent) or {}
         mask = info.get("action_mask")
         if mask is None:
-            rows.append(np.ones(action_dim, dtype=np.float32))
+            rows.append(np.ones(total_action_dim, dtype=np.float32))
         else:
             rows.append(np.asarray(mask, dtype=np.float32))
     return np.stack(rows, axis=0)
@@ -44,12 +45,7 @@ def _mask_logits(logits, mask):
 
 
 class RunningMeanStd:
-    """Welford-style running statistics over a stream of scalar values.
-
-    Used to normalize critic targets so the value head only ever sees roughly
-    zero-mean, unit-variance returns; predictions are denormalized when fed
-    back into GAE so advantages keep their real-world scale.
-    """
+    """Welford-style running statistics over a stream of scalar values."""
 
     def __init__(self) -> None:
         self.mean = 0.0
@@ -85,7 +81,7 @@ def _compute_gae(
     gamma: float,
     gae_lambda: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute Generalized Advantage Estimation targets."""
+    """Compute Generalised Advantage Estimation targets."""
     advantages = np.zeros_like(rewards, dtype=np.float32)
     gae = 0.0
 
@@ -108,7 +104,7 @@ class MappoModel:
     critic: Any
     traffic_light_ids: tuple[str, ...]
     obs_dim: int
-    action_dim: int
+    action_dims: list[int]
     config: dict[str, Any]
     device: str = "cpu"
     policy_name: str = "MAPPO"
@@ -118,31 +114,53 @@ class MappoModel:
         observation: np.ndarray,
         mask: np.ndarray | None = None,
         deterministic: bool = True,
-    ) -> int:
+    ) -> list[int]:
         import torch
         from torch.distributions import Categorical
 
-        obs_tensor = torch.as_tensor(np.asarray(observation, dtype=np.float32), dtype=torch.float32, device=self.device)
+        obs_tensor = torch.as_tensor(
+            np.asarray(observation, dtype=np.float32), 
+            dtype=torch.float32, 
+            device=self.device
+        )
 
         with torch.no_grad():
-            logits = self.actor(obs_tensor.unsqueeze(0)).squeeze(0)
-            if mask is not None:
-                mask_tensor = torch.as_tensor(np.asarray(mask, dtype=np.float32), dtype=torch.float32, device=self.device)
-                logits = _mask_logits(logits, mask_tensor)
-            if deterministic:
-                action_tensor = torch.argmax(logits, dim=-1)
-            else:
-                action_tensor = Categorical(logits=logits).sample()
+            # Get the list of logits (one for traffic, one for sharing)
+            logits_list = self.actor(obs_tensor.unsqueeze(0))
+            traffic_dim = self.action_dims[0]
 
-        return int(action_tensor.item())
+            if mask is not None:
+                mask_tensor = torch.as_tensor(
+                    np.asarray(mask, dtype=np.float32), 
+                    dtype=torch.float32, 
+                    device=self.device
+                )
+                # Split the mask to match the two branches
+                t_mask = mask_tensor[..., :traffic_dim]
+                s_mask = mask_tensor[..., traffic_dim:]
+                
+                logits_list[0] = _mask_logits(logits_list[0].squeeze(0), t_mask)
+                logits_list[1] = _mask_logits(logits_list[1].squeeze(0), s_mask)
+            else:
+                logits_list[0] = logits_list[0].squeeze(0)
+                logits_list[1] = logits_list[1].squeeze(0)
+
+            actions = []
+            for logits in logits_list:
+                if deterministic:
+                    actions.append(int(torch.argmax(logits, dim=-1).item()))
+                else:
+                    actions.append(int(Categorical(logits=logits).sample().item()))
+
+        return actions
 
     def act(
         self,
         observations: dict[str, np.ndarray],
         infos: dict[str, dict] | None = None,
         deterministic: bool = True,
-    ) -> dict[str, int]:
-        actions: dict[str, int] = {}
+    ) -> dict[str, list[int]]:
+        actions: dict[str, list[int]] = {}
         for agent_id in self.traffic_light_ids:
             mask = None
             if infos is not None:
@@ -154,13 +172,9 @@ class MappoModel:
         return actions
 
     def predict(self, observation: np.ndarray, deterministic: bool = True):
-        """SB3-style compatibility for single-agent evaluation paths."""
-
         return self._act_single(observation, deterministic=deterministic), None
 
     def __call__(self, observation: np.ndarray, deterministic: bool = True):
-        """Extra compatibility for older notebook cells or ad hoc usage."""
-
         return self.predict(observation, deterministic=deterministic)
 
 
@@ -174,7 +188,7 @@ def train_mappo(
     seed=42,
     env_kwargs=None,
 ):
-    """Train a small shared-actor / centralized-critic MAPPO baseline."""
+    """Train a shared-actor / centralised-critic MAPPO baseline with peer rewarding."""
 
     from marl_tsc.traffic_env import SumoTrafficEnv
     import torch
@@ -182,6 +196,7 @@ def train_mappo(
     import torch.nn.functional as F
     from torch.distributions import Categorical
     from torch.optim import Adam
+    from collections import deque
 
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -196,17 +211,23 @@ def train_mappo(
         seed=seed,
         **env_options,
     )
+    
     # Apply peer rewarding for MAPPO training
     env = PeerRewardingWrapper(env, division=10)
     observations, infos = env.reset(seed=seed)
     agent_ids = tuple(traffic_light_ids or env.agents)
+    
     if not agent_ids:
         env.close()
         raise ValueError("traffic_light_ids must contain at least one agent.")
 
     obs_dim = int(np.asarray(observations[agent_ids[0]], dtype=np.float32).shape[0])
+    
+    # Extract multiple action dimensions for the two branches
     action_dims = env.action_space(agent_ids[0]).nvec.tolist()
+    total_action_dim = sum(action_dims)
     num_agents = len(agent_ids)
+    
     hidden_size = 128
     critic_hidden_size = 256
 
@@ -214,28 +235,39 @@ def train_mappo(
         def __init__(
             self,
             obs_size: int,
-            action_size: int,
+            action_dims: list[int],
             phase_queue_start: int | None = None,
         ) -> None:
             super().__init__()
-            self.action_size = action_size
+            self.action_dims = action_dims
             self.phase_queue_start = phase_queue_start
             self.queue_logit_scale = nn.Parameter(torch.tensor(2.0))
-            self.net = nn.Sequential(
+            
+            # Base network shared by both action branches
+            self.base = nn.Sequential(
                 nn.Linear(obs_size, hidden_size),
                 nn.ReLU(),
                 nn.Linear(hidden_size, hidden_size),
                 nn.ReLU(),
-                nn.Linear(hidden_size, action_size),
             )
+            
+            # Create a separate branch for traffic phase and sharing percentage
+            self.branches = nn.ModuleList([
+                nn.Linear(hidden_size, dim) for dim in action_dims
+            ])
 
-        def forward(self, obs: torch.Tensor) -> torch.Tensor:
-            logits = self.net(obs)
+        def forward(self, obs: torch.Tensor) -> list[torch.Tensor]:
+            x = self.base(obs)
+            logits = [branch(x) for branch in self.branches]
+
+            # Apply queue logic ONLY to the traffic branch (index 0)
             if self.phase_queue_start is not None:
+                traffic_dim = self.action_dims[0]
                 phase_queues = obs[
-                    ..., self.phase_queue_start : self.phase_queue_start + self.action_size
+                    ..., self.phase_queue_start : self.phase_queue_start + traffic_dim
                 ]
-                logits = logits + self.queue_logit_scale.clamp(0.0, 5.0) * phase_queues
+                logits[0] = logits[0] + self.queue_logit_scale.clamp(0.0, 5.0) * phase_queues
+                
             return logits
 
     class Critic(nn.Module):
@@ -256,8 +288,9 @@ def train_mappo(
     if env_options.get("include_phase_queue_features", True):
         phase_queue_start = int(env.max_lanes_per_tls) + 2
 
-    actor = Actor(obs_dim, action_dim, phase_queue_start=phase_queue_start).to(device)
+    actor = Actor(obs_dim, action_dims, phase_queue_start=phase_queue_start).to(device)
     critic = Critic(obs_dim * num_agents).to(device)
+    
     learning_rate = 3e-4
     optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=learning_rate)
 
@@ -275,7 +308,6 @@ def train_mappo(
     global_steps = 0
     episode_index = 0
 
-    from collections import deque
     episode_returns = deque(maxlen=100)
     current_episode_return = 0.0
 
@@ -292,23 +324,39 @@ def train_mappo(
         while len(rollout_rewards) < rollout_steps and global_steps < total_timesteps:
             local_obs = _stack_agent_observations(observations, agent_ids)
             central_obs = local_obs.reshape(-1)
-            mask_array = _stack_agent_masks(infos, agent_ids, action_dim)
+            # Fetch the combined masks for both actions
+            mask_array = _stack_agent_masks(infos, agent_ids, total_action_dim)
 
             with torch.no_grad():
                 local_obs_tensor = torch.as_tensor(local_obs, dtype=torch.float32, device=device)
                 central_obs_tensor = torch.as_tensor(central_obs, dtype=torch.float32, device=device)
                 mask_tensor = torch.as_tensor(mask_array, dtype=torch.float32, device=device)
-                logits = actor(local_obs_tensor)
-                masked_logits = _mask_logits(logits, mask_tensor)
-                dist = Categorical(logits=masked_logits)
-                actions_tensor = dist.sample()
-                log_probs_tensor = dist.log_prob(actions_tensor)
+                
+                # Retrieve logits for both branches
+                logits_list = actor(local_obs_tensor)
+                
+                traffic_dim = action_dims[0]
+                t_mask = mask_tensor[:, :traffic_dim]
+                s_mask = mask_tensor[:, traffic_dim:]
+                
+                masked_t_logits = _mask_logits(logits_list[0], t_mask)
+                masked_s_logits = _mask_logits(logits_list[1], s_mask)
+                
+                dist_t = Categorical(logits=masked_t_logits)
+                dist_s = Categorical(logits=masked_s_logits)
+                
+                act_t = dist_t.sample()
+                act_s = dist_s.sample()
+                
+                # Sum the log probabilities from both branches
+                log_probs_tensor = dist_t.log_prob(act_t) + dist_s.log_prob(act_s)
                 value_tensor = critic(central_obs_tensor)
 
             actions = {
-                agent_id: int(action)
-                for agent_id, action in zip(agent_ids, actions_tensor.cpu().tolist())
+                agent_id: [int(t), int(s)]
+                for agent_id, t, s in zip(agent_ids, act_t.cpu().tolist(), act_s.cpu().tolist())
             }
+            
             next_observations, rewards, terminations, truncations, next_infos = env.step(actions)
             local_rewards = np.asarray([float(rewards.get(agent_id, 0.0)) for agent_id in agent_ids], dtype=np.float32)
             global_reward = float(np.mean(local_rewards)) if local_rewards.size else 0.0
@@ -319,7 +367,11 @@ def train_mappo(
 
             rollout_local_obs.append(local_obs)
             rollout_central_obs.append(central_obs)
-            rollout_actions.append(np.asarray(actions_tensor.cpu().tolist(), dtype=np.int64))
+            
+            # Store both actions in a unified tensor
+            combined_actions = torch.stack([act_t, act_s], dim=-1)
+            rollout_actions.append(np.asarray(combined_actions.cpu().tolist(), dtype=np.int64))
+            
             rollout_log_probs.append(np.asarray(log_probs_tensor.cpu().tolist(), dtype=np.float32))
             rollout_masks.append(mask_array)
             rollout_rewards.append(blended_rewards)
@@ -395,19 +447,35 @@ def train_mappo(
         mask_batch_tensor = torch.as_tensor(mask_batch, dtype=torch.float32, device=device)
 
         for _ in range(update_epochs):
-            logits = actor(actor_obs_batch)
-            masked_logits = _mask_logits(logits, mask_batch_tensor)
-            dist = Categorical(logits=masked_logits)
-            new_log_probs = dist.log_prob(actor_action_batch)
+            logits_list = actor(actor_obs_batch)
+            
+            traffic_dim = action_dims[0]
+            t_mask = mask_batch_tensor[:, :traffic_dim]
+            s_mask = mask_batch_tensor[:, traffic_dim:]
+            
+            masked_t_logits = _mask_logits(logits_list[0], t_mask)
+            masked_s_logits = _mask_logits(logits_list[1], s_mask)
+            
+            dist_t = Categorical(logits=masked_t_logits)
+            dist_s = Categorical(logits=masked_s_logits)
+            
+            # Read the actions back out from the batch array
+            act_t = actor_action_batch[:, 0]
+            act_s = actor_action_batch[:, 1]
+            
+            # Sum the probabilities and entropies
+            new_log_probs = dist_t.log_prob(act_t) + dist_s.log_prob(act_s)
+            entropy_loss = dist_t.entropy().mean() + dist_s.entropy().mean()
+            
             ratio = torch.exp(new_log_probs - old_log_prob_batch_tensor)
             unclipped = ratio * advantage_batch_tensor
             clipped = torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef) * advantage_batch_tensor
 
             policy_loss = -torch.min(unclipped, clipped).mean()
-            entropy_loss = dist.entropy().mean()
 
             predicted_values = critic(central_obs_batch)
             value_loss = F.mse_loss(predicted_values, return_batch)
+            
             loss = policy_loss + value_coef * value_loss - entropy_coef * entropy_loss
 
             optimizer.zero_grad()
@@ -435,12 +503,12 @@ def train_mappo(
         critic=critic,
         traffic_light_ids=agent_ids,
         obs_dim=obs_dim,
-        action_dim=action_dim,
+        action_dims=action_dims,
         config={
             "algorithm_name": "mappo",
             "traffic_light_ids": list(agent_ids),
             "obs_dim": obs_dim,
-            "action_dim": action_dim,
+            "action_dims": action_dims,
             "num_agents": num_agents,
             "total_timesteps": total_timesteps,
             "rollout_steps": rollout_steps,
