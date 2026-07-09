@@ -119,7 +119,7 @@ class GraphRollout:
 
             values=torch.stack(
                 values
-            ).squeeze(-1),
+            ).reshape(len(transitions), -1),
 
             rewards=torch.tensor(
                 rewards,
