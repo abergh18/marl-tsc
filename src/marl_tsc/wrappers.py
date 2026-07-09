@@ -6,6 +6,7 @@ from pettingzoo.utils.wrappers import BaseParallelWrapper
 class PeerRewardingWrapper(BaseParallelWrapper):
     """
     A wrapper that adds simultaneous peer rewarding to a PettingZoo environment.
+    Uses a 'Public Goods' mechanic to prevent agents from exploiting negative rewards.
     """
 
     def __init__(self, env, division=10):
@@ -43,14 +44,25 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         sharing_pool = 0.0
         num_agents = len(self.agents)
 
+        # 1. Agents generate cooperative value
         for agent in self.agents:
-            give = sharing_actions[agent] * self.portion_size * rewards[agent]
-            receive = give / max(1, num_agents - 1)
-            sharing_pool += receive
-            final_rewards[agent] = rewards[agent] - give - receive
+            share_percentage = sharing_actions[agent] * self.portion_size
+            
+            # It costs the agent 1.0 to fully share, but generates 2.0 for the pool.
+            # This creates a synergy multiplier while preventing penalty-dumping.
+            personal_cost = share_percentage * 1.0
+            community_contribution = share_percentage * 2.0
+            
+            sharing_pool += community_contribution
+            
+            # The agent MUST keep its original traffic penalty, minus the cost of sharing
+            final_rewards[agent] = rewards[agent] - personal_cost
+
+        # 2. Distribute the pooled community rewards equally
+        payout_per_agent = sharing_pool / max(1, num_agents)
 
         for agent in self.agents:
-            final_rewards[agent] += sharing_pool
+            final_rewards[agent] += payout_per_agent
 
         infos = self._update_action_masks(infos)
         return obs, final_rewards, terms, truncs, infos
