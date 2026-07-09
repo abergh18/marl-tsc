@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+import random
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
-import random
+
 import numpy as np
 
 
@@ -14,7 +15,9 @@ def _make_vec_env(env):
     import supersuit as ss
 
     vec_env = ss.pettingzoo_env_to_vec_env_v1(env)
-    vec_env = ss.concat_vec_envs_v1(vec_env, 1, num_cpus=1, base_class="stable_baselines3")
+    vec_env = ss.concat_vec_envs_v1(
+        vec_env, 1, num_cpus=1, base_class="stable_baselines3"
+    )
 
     target_env = vec_env.venv if hasattr(vec_env, "venv") else vec_env
     if not hasattr(target_env, "seed"):
@@ -35,10 +38,9 @@ def _make_vec_env(env):
 def _make_reward_logger_callback(algorithm_name: str):
     """Factory for a Stable Baselines3 callback that logs performance metrics."""
     from stable_baselines3.common.callbacks import BaseCallback
-    from collections import deque
 
     class RewardLoggerCallback(BaseCallback):
-        """Logs per-step rewards and computes moving average returns during training."""
+        """Logs per-step rewards and computes moving average returns."""
 
         def __init__(self):
             super().__init__()
@@ -70,14 +72,18 @@ def _make_reward_logger_callback(algorithm_name: str):
 
             if rewards is not None:
                 reward_values = [float(reward) for reward in rewards]
-                mean_reward = sum(reward_values) / len(reward_values) if reward_values else 0.0
+                mean_reward = (
+                    sum(reward_values) / len(reward_values) if reward_values else 0.0
+                )
                 self.history.append(
                     {
                         "algorithm": algorithm_name,
                         "timestep": int(self.num_timesteps),
                         "mean_training_reward": mean_reward,
                         "moving_avg_episode_return": (
-                            float(np.mean(self.episode_returns)) if self.episode_returns else 0.0
+                            float(np.mean(self.episode_returns))
+                            if self.episode_returns
+                            else 0.0
                         ),
                         "episodes_completed": self.completed_episodes,
                     }
@@ -98,8 +104,8 @@ def train_ppo(
 ):
     """Sets up the environment and trains a PPO model using parameter sharing."""
 
-    from stable_baselines3 import PPO
     from marl_tsc.traffic_env import SumoTrafficEnv
+    from stable_baselines3 import PPO
 
     algorithm = "ppo"
 
@@ -139,7 +145,6 @@ def train_ppo(
     return model, reward_logger.history, model_path.with_suffix(".zip")
 
 
-
 def _policy_name(policy) -> str:
     """Return a readable name for a policy object or function."""
     policy_name = getattr(policy, "policy_name", None)
@@ -161,7 +166,7 @@ def _actions_from_policy(
     observations,
     step_index: int,
     infos: dict[str, dict] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Ask a MAPPO model, SB3 model, or baseline function for actions."""
     if hasattr(policy, "act") and callable(policy.act):
         try:
@@ -195,13 +200,14 @@ def evaluate_policy(
     """Evaluate a policy over multiple episodes.
 
     Collects reward, queue, switching, arrivals, waiting-time, and time-loss
-    metrics so policies cannot look good by optimizing only one queue average.
+    metrics so policies cannot look good by optimising only one queue average.
     """
 
     from marl_tsc.traffic_env import SumoTrafficEnv
 
     env_options = dict(env_kwargs or {})
     env_options.setdefault("global_metric_interval", 10)
+    
     episode_rewards = []
     episode_queues = []
     episode_max_queues = []
@@ -215,6 +221,7 @@ def evaluate_policy(
     for episode_index in range(episodes):
         random.seed(seed + episode_index)
         np.random.seed(seed + episode_index)
+        
         env = SumoTrafficEnv(
             config_file,
             possible_agents=traffic_light_ids,
@@ -222,6 +229,14 @@ def evaluate_policy(
             seed=seed + episode_index,
             **env_options,
         )
+        
+        # --- NEW CODE: AUTOMATIC WRAPPER DETECTION ---
+        # If the policy has multiple action dimensions, it needs the peer-rewarding wrapper!
+        if hasattr(policy, "action_dims") and len(policy.action_dims) > 1:
+            from marl_tsc.wrappers import PeerRewardingWrapper
+            env = PeerRewardingWrapper(env, division=10)
+        # ---------------------------------------------
+
         observations, infos = env.reset(seed=seed + episode_index)
 
         episode_reward = 0.0
@@ -241,8 +256,12 @@ def evaluate_policy(
                 if not env.agents:
                     break
 
-                actions = _actions_from_policy(policy, env, observations, step_index, infos=infos)
-                print(f"Actions: {actions}")
+                actions = _actions_from_policy(
+                    policy, env, observations, step_index, infos=infos
+                )
+                
+                # Removing the action print statement here to prevent spamming your console 
+                # during long evaluation runs, but you can add it back if needed for debugging!
                 observations, rewards, _, truncations, infos = env.step(actions)
 
                 episode_reward += float(sum(rewards.values()))
@@ -362,8 +381,12 @@ def plot_moving_average_histories(histories, window=100):
         )
         smoothed = algo_df[metric].rolling(window=window, min_periods=1).mean()
 
-        (line,) = ax.plot(algo_df["timestep"], smoothed, label=f"{algorithm.upper()} (Smooth)")
-        ax.plot(algo_df["timestep"], algo_df[metric], alpha=0.15, color=line.get_color())
+        (line,) = ax.plot(
+            algo_df["timestep"], smoothed, label=f"{algorithm.upper()} (Smooth)"
+        )
+        ax.plot(
+            algo_df["timestep"], algo_df[metric], alpha=0.15, color=line.get_color()
+        )
 
     ax.set_xlabel("Timesteps")
     ax.set_ylabel("Reward")
