@@ -40,18 +40,20 @@ class PeerRewardingWrapper(BaseParallelWrapper):
 
         obs, rewards, terms, truncs, infos = self.env.step(env_actions)
 
-        final_rewards = {agent: 0.0 for agent in self.agents}
+final_rewards = {agent: 0.0 for agent in self.agents}
         sharing_pool = 0.0
         num_agents = len(self.agents)
 
-        # 1. Agents generate cooperative value
+        # 1. Agents generate cooperative value (Scaled down!)
         for agent in self.agents:
+            # share_percentage is between 0.0 and 1.0
             share_percentage = sharing_actions[agent] * self.portion_size
             
-            # It costs the agent 1.0 to fully share, but generates 2.0 for the pool.
-            # This creates a synergy multiplier while preventing penalty-dumping.
-            personal_cost = share_percentage * 1.0
-            community_contribution = share_percentage * 2.0
+            # SCALED DOWN: Max cost is now only 0.01 points per step
+            personal_cost = share_percentage * 0.01
+            
+            # The community multiplier is 2.0, so the max contribution is 0.02
+            community_contribution = personal_cost * 2.0
             
             sharing_pool += community_contribution
             
@@ -59,6 +61,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
             final_rewards[agent] = rewards[agent] - personal_cost
 
         # 2. Distribute the pooled community rewards equally
+        # Removed the + 0.05 to close the free money loophole!
         payout_per_agent = sharing_pool / max(1, num_agents)
 
         for agent in self.agents:
