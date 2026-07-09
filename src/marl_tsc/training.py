@@ -1,4 +1,10 @@
-"""Training, evaluation, and plotting helpers for the notebook."""
+"""
+training.py
+
+Training, evaluation, and plotting helpers for the MARL traffic environment.
+Provides utilities for running stable-baselines3 algorithms and evaluating
+custom policies with real-world traffic constraints.
+"""
 
 from __future__ import annotations
 
@@ -230,12 +236,14 @@ def evaluate_policy(
             **env_options,
         )
         
-        # --- NEW CODE: AUTOMATIC WRAPPER DETECTION ---
+        # Force ALL policies to obey real-world traffic physics
+        from marl_tsc.wrappers import MinimumGreenTimeWrapper
+        env = MinimumGreenTimeWrapper(env, min_green_steps=10)
+
         # If the policy has multiple action dimensions, it needs the peer-rewarding wrapper!
         if hasattr(policy, "action_dims") and len(policy.action_dims) > 1:
             from marl_tsc.wrappers import PeerRewardingWrapper
             env = PeerRewardingWrapper(env, division=10)
-        # ---------------------------------------------
 
         observations, infos = env.reset(seed=seed + episode_index)
 
@@ -260,8 +268,6 @@ def evaluate_policy(
                     policy, env, observations, step_index, infos=infos
                 )
                 
-                # Removing the action print statement here to prevent spamming your console 
-                # during long evaluation runs, but you can add it back if needed for debugging!
                 observations, rewards, _, truncations, infos = env.step(actions)
 
                 episode_reward += float(sum(rewards.values()))
