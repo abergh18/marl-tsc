@@ -40,7 +40,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
 
         obs, rewards, terms, truncs, infos = self.env.step(env_actions)
 
-final_rewards = {agent: 0.0 for agent in self.agents}
+        final_rewards = {agent: 0.0 for agent in self.agents}
         sharing_pool = 0.0
         num_agents = len(self.agents)
 
