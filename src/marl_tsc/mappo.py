@@ -358,11 +358,11 @@ def train_mappo(
                 act_s = dist_s.sample() if dist_s is not None else torch.zeros_like(act_t)
                 
                 # Sum the log probabilities from both branches
-                log_probs_tensor = dist_t.log_prob(act_t) + dist_s.log_prob(act_s)
+                log_probs_tensor = dist_t.log_prob(act_t) + (dist_s.log_prob(act_s) if dist_s is not None else 0.0)
                 value_tensor = critic(central_obs_tensor)
 
             actions = {
-                agent_id: [int(t), int(s)]
+                agent_id: [int(t), int(s)] if dist_s is not None else int(t)
                 for agent_id, t, s in zip(agent_ids, act_t.cpu().tolist(), act_s.cpu().tolist())
             }
             
@@ -476,8 +476,8 @@ def train_mappo(
             act_s = actor_action_batch[:, 1]
             
             # Sum the probabilities and entropies
-            new_log_probs = dist_t.log_prob(act_t) + dist_s.log_prob(act_s)
-            entropy_loss = dist_t.entropy().mean() + dist_s.entropy().mean()
+            new_log_probs = dist_t.log_prob(act_t) + (dist_s.log_prob(act_s) if dist_s is not None else 0.0)
+            entropy_loss = dist_t.entropy().mean() + (dist_s.entropy().mean() if dist_s is not None else 0.0)
             
             ratio = torch.exp(new_log_probs - old_log_prob_batch_tensor)
             unclipped = ratio * advantage_batch_tensor
