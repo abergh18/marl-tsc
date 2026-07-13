@@ -135,15 +135,15 @@ class MappoModel:
                     dtype=torch.float32, 
                     device=self.device
                 )
-                # Split the mask to match the two branches
                 t_mask = mask_tensor[..., :traffic_dim]
-                s_mask = mask_tensor[..., traffic_dim:]
-                
                 logits_list[0] = _mask_logits(logits_list[0].squeeze(0), t_mask)
-                logits_list[1] = _mask_logits(logits_list[1].squeeze(0), s_mask)
+                if len(logits_list) > 1:
+                    s_mask = mask_tensor[..., traffic_dim:]
+                    logits_list[1] = _mask_logits(logits_list[1].squeeze(0), s_mask)
             else:
                 logits_list[0] = logits_list[0].squeeze(0)
-                logits_list[1] = logits_list[1].squeeze(0)
+                if len(logits_list) > 1:
+                    logits_list[1] = logits_list[1].squeeze(0)
 
             actions = []
             for logits in logits_list:
@@ -152,7 +152,7 @@ class MappoModel:
                 else:
                     actions.append(int(Categorical(logits=logits).sample().item()))
 
-        return actions
+        return actions if len(actions) > 1 else actions[0]
 
     def act(
         self,
