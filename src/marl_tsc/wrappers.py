@@ -333,6 +333,9 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
 
         agent_ids = list(self.agents)
 
+        if not agent_ids:
+          return obs, {}, terms, truncs, infos
+
         # 3. Apply zero-sum redistribution
         redistributed = self.calculator.redistribute(
             rewards=rewards,

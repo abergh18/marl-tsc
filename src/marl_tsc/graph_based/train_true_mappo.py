@@ -26,10 +26,9 @@ Typical usage (zero-sum gifting):
 
 reward_sharing options
 ----------------------
-None        — no gifting, standard true MAPPO (default)
-"zero_sum"  — zero-sum peer reward sharing via ZeroSumRewardWrapper
-              Additional reward sharing types can be added here as
-              further wrappers are implemented.
+None           — no gifting, standard true MAPPO (default)
+"zero_sum"     — zero-sum peer reward sharing via ZeroSumRewardWrapper
+"public_goods" — public goods peer reward sharing via PeerRewardingWrapper
 """
 
 from __future__ import annotations
@@ -95,8 +94,9 @@ def train_true_mappo(
     critic_hidden_dim : int
     reward_sharing : str or None
         Reward sharing mechanism to use. Options:
-            None        — standard true MAPPO, no gifting
-            "zero_sum"  — zero-sum peer reward sharing
+            None           — standard true MAPPO, no gifting
+            "zero_sum"     — zero-sum peer reward sharing
+            "public_goods" — public goods peer reward sharing
     gifting_divisions : int or None
         Number of discrete gifting portions. Defaults to
         num_agents - 1 when reward_sharing is not None.
@@ -112,94 +112,92 @@ def train_true_mappo(
     env_options = dict(env_kwargs or {})
     env_options.setdefault("collect_global_metrics", False)
 
-    # ── Build base environment ────────────────────────────────────────────────
-    env = GraphTrafficEnv(
-        config_file=config_file,
-        network_file=network_file,
-        possible_agents=traffic_light_ids,
-    )
+    env = None
 
     try:
-        graph_obs, infos = env.reset()
-        obs_dim = env.obs_dim
-        agent_ids = env.agent_ids
-        action_dim = int(env.action_spaces[agent_ids[0]].n)
-        global_state_dim = env.global_state_dim
-        num_agents = len(agent_ids)
+        # ── Build environment ─────────────────────────────────────────────────
+        # For reward sharing, SumoTrafficEnv is constructed first, wrapped,
+        # then passed to GraphTrafficEnv — preventing two SUMO instances.
+        # For standard MAPPO, GraphTrafficEnv constructs SumoTrafficEnv itself.
 
-        # ── Apply reward sharing wrapper ──────────────────────────────────────
         if reward_sharing is not None:
+            from marl_tsc.traffic_env import SumoTrafficEnv
+            from marl_tsc.graph_based.gifting_graph_runner import GiftingGraphRunner
+            from marl_tsc.graph_based.models.reward_sharing_mappo_policy import GiftingMAPPOPolicy
+            from marl_tsc.graph_based.models.true_mappo_policy import CentralisedCritic
+            from marl_tsc.graph_based.encoders.gat_encoder import GATEncoder
+
+            sumo_env = SumoTrafficEnv(
+                config_file,
+                possible_agents=traffic_light_ids,
+            )
+
+            num_agents = len(traffic_light_ids)
             num_divisions = gifting_divisions or max(1, num_agents - 1)
 
             if reward_sharing == "zero_sum":
-                from marl_tsc.graph_based.gifting_graph_runner import GiftingGraphRunner
-                from marl_tsc.models.reward_sharing_mappo_policy import GiftingMAPPOPolicy
-                from marl_tsc.graph_based.models.true_mappo_policy import CentralisedCritic
-                from marl_tsc.graph_based.models.graph_encoder import GATEncoder
-    
-                env = ZeroSumRewardWrapper(env, division=num_divisions)
-                graph_obs, infos = env.reset()
-    
-                encoder = GATEncoder(
-                    obs_dim=obs_dim,
-                    hidden_dim=hidden_dim,
-                )
-                centralised_critic = CentralisedCritic(
-                    global_state_dim=global_state_dim,
-                    hidden_dim=critic_hidden_dim,
-                )
-    
-                policy = GiftingMAPPOPolicy(
-                    encoder=encoder,
-                    action_dim=action_dim,
-                    num_divisions=num_divisions,
-                    centralised_critic=centralised_critic,
-                    hidden_dim=hidden_dim,
-                ).to(device)
-    
-                runner_class = GiftingGraphRunner
+                from marl_tsc.wrappers import ZeroSumRewardWrapper
+                wrapped_sumo = ZeroSumRewardWrapper(sumo_env, division=num_divisions)
                 algorithm_name = "true_mappo_zero_sum"
                 model_filename = "true_mappo_zero_sum.pt"
 
             elif reward_sharing == "public_goods":
-              from marl_tsc.wrappers import PeerRewardingWrapper
-              from marl_tsc.graph_based.gifting_graph_runner import GiftingGraphRunner
-              from marl_tsc.graph_based.reward_sharing_mappo_policy import GiftingMAPPOPolicy
-              from marl_tsc.graph_based.models.true_mappo_policy import CentralisedCritic
-              from marl_tsc.graph_based.models.graph_encoder import GATEncoder
+                from marl_tsc.wrappers import PeerRewardingWrapper
+                wrapped_sumo = PeerRewardingWrapper(sumo_env, division=num_divisions)
+                algorithm_name = "true_mappo_public_goods"
+                model_filename = "true_mappo_public_goods.pt"
 
-              env = PeerRewardingWrapper(env, division=num_divisions)
-              graph_obs, infos = env.reset()
-
-              encoder = GATEncoder(
-                  obs_dim=obs_dim,
-                  hidden_dim=hidden_dim,
-              )
-              centralised_critic = CentralisedCritic(
-                  global_state_dim=global_state_dim,
-                  hidden_dim=critic_hidden_dim,
-              )
-
-              policy = GiftingMAPPOPolicy(
-                  encoder=encoder,
-                  action_dim=action_dim,
-                  num_divisions=num_divisions,
-                  centralised_critic=centralised_critic,
-                  hidden_dim=hidden_dim,
-              ).to(device)
-
-              runner_class = GiftingGraphRunner
-              algorithm_name = "true_mappo_public_goods"
-              model_filename = "true_mappo_public_goods.pt"
-            
             else:
                 raise ValueError(
                     f"Unknown reward_sharing type: {reward_sharing!r}. "
-                    f"Currently supported: 'public_goods', 'zero_sum'."
+                    f"Currently supported: 'zero_sum', 'public_goods'."
                 )
 
+            env = GraphTrafficEnv(
+                config_file=config_file,
+                network_file=network_file,
+                possible_agents=traffic_light_ids,
+                sumo_env=wrapped_sumo,
+            )
+
+            graph_obs, infos = env.reset()
+            obs_dim = graph_obs.graph.x.shape[1]
+            agent_ids = env.agent_ids
+            action_dim = int(env.action_spaces[agent_ids[0]].nvec[0])
+            global_state_dim = env.global_state_dim
+
+            encoder = GATEncoder(
+                obs_dim=obs_dim,
+                hidden_dim=hidden_dim,
+            )
+            centralised_critic = CentralisedCritic(
+                global_state_dim=global_state_dim,
+                hidden_dim=critic_hidden_dim,
+            )
+            policy = GiftingMAPPOPolicy(
+                encoder=encoder,
+                action_dim=action_dim,
+                num_divisions=num_divisions,
+                centralised_critic=centralised_critic,
+                hidden_dim=hidden_dim,
+            ).to(device)
+
+            runner_class = GiftingGraphRunner
+
         else:
-            # Standard true MAPPO — no gifting
+            # ── Standard true MAPPO — no gifting ─────────────────────────────
+            env = GraphTrafficEnv(
+                config_file=config_file,
+                network_file=network_file,
+                possible_agents=traffic_light_ids,
+            )
+
+            graph_obs, infos = env.reset()
+            obs_dim = graph_obs.graph.x.shape[1]
+            agent_ids = env.agent_ids
+            action_dim = int(env.action_spaces[agent_ids[0]].n)
+            global_state_dim = env.global_state_dim
+
             policy = build_default_graph_mappo_policy(
                 obs_dim=obs_dim,
                 action_dim=action_dim,
@@ -252,4 +250,5 @@ def train_true_mappo(
         return model, history, model_path
 
     finally:
-        env.close()
+        if env is not None:
+            env.close()

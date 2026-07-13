@@ -11,14 +11,16 @@ conditionals, clean comparison integrity.
 
 What changes
 ------------
-- Samples a gifting action from GiftingMAPPOPolicy.gifting_head alongside
+- Samples a gifting action from GiftingMAPPOPolicy.branches[1] alongside
   the traffic action each step.
-- Applies zero-sum reward redistribution after env.step() using the
-  gifting actions, before storing the transition.
+- Applies reward sharing via the wrapper (PeerRewardingWrapper or
+  ZeroSumRewardWrapper) which handles redistribution internally.
 - Stores gifting actions and log probs in GiftingTransition for separate
   PPO loss computation in TrueMAPPOTrainer.
 - Extracts and logs gifting stats from infos into the transition for
   downstream history logging.
+- Done check happens before appending transition to avoid empty reward
+  dicts from terminal steps.
 """
 
 from __future__ import annotations
@@ -56,18 +58,20 @@ class GiftingTransition(Transition):
 
 class GiftingGraphRunner(GraphRunner):
     """
-    GraphRunner subclass for zero-sum gifting experiments.
+    GraphRunner subclass for reward sharing experiments.
 
     Assumes:
-    - env is wrapped with ZeroSumRewardWrapper (MultiDiscrete action space)
-    - policy is GiftingMAPPOPolicy (has .gifting_head)
+    - env is wrapped with PeerRewardingWrapper or ZeroSumRewardWrapper
+      (MultiDiscrete action space)
+    - policy is GiftingMAPPOPolicy (has .branches[0] for traffic,
+      .branches[1] for gifting)
 
     Parameters
     ----------
-    env : ZeroSumRewardWrapper
+    env : PeerRewardingWrapper or ZeroSumRewardWrapper
         Environment with extended MultiDiscrete action space.
     policy : GiftingMAPPOPolicy
-        Policy with traffic actor, centralised critic, and gifting head.
+        Policy with shared encoder and branched actor heads.
     """
 
     def collect_rollout(
@@ -95,9 +99,7 @@ class GiftingGraphRunner(GraphRunner):
             policy_output = self.policy(graph_obs_device)
 
             # ── Traffic action ────────────────────────────────────────────────
-            # Action mask covers only traffic dimensions — gifting is always
-            # legal so the gifting portion of the mask is all-ones.
-            # We slice just the traffic part for masking logits.
+            # Slice just the traffic portion of the mask
             traffic_action_dim = policy_output.logits.shape[-1]
 
             masks = np.stack(
@@ -134,7 +136,6 @@ class GiftingGraphRunner(GraphRunner):
             )                                                # (num_agents,)
 
             # ── Build action dicts ────────────────────────────────────────────
-            # ZeroSumRewardWrapper expects [traffic_action, gifting_action]
             action_dict = {
                 agent_id: [int(t), int(g)]
                 for agent_id, t, g in zip(
@@ -155,7 +156,7 @@ class GiftingGraphRunner(GraphRunner):
             # ── Environment step ──────────────────────────────────────────────
             (
                 next_graph_obs,
-                rewards,          # already redistributed by ZeroSumRewardWrapper
+                rewards,
                 terminations,
                 truncations,
                 infos,
@@ -166,8 +167,19 @@ class GiftingGraphRunner(GraphRunner):
                 or any(truncations.values())
             )
 
+            # ── Done check before appending ───────────────────────────────────
+            # If the episode ended, reset and break before storing the
+            # terminal transition. The terminal reward dict may be empty
+            # or incomplete after SumoTrafficEnv clears self.agents.
+            if done:
+                graph_obs, infos = self.env.reset()
+                if len(rollout) == 0:
+                    # Episode ended before any transitions collected
+                    # Reset and continue rather than returning empty rollout
+                    continue
+                break
+
             # ── Extract gifting stats from infos ──────────────────────────────
-            # ZeroSumRewardWrapper attaches these at each step.
             first_agent = graph_obs.agent_ids[0]
             gifting_stats = {
                 "mean_gift_fraction": infos[first_agent].get("mean_gift_fraction", 0.0),
@@ -176,8 +188,6 @@ class GiftingGraphRunner(GraphRunner):
             }
 
             # ── Store transition ──────────────────────────────────────────────
-            # traffic log_prob stored in the standard field so existing
-            # RolloutBatch and GAE code works unchanged.
             rollout.append(
                 GiftingTransition(
                     observation=graph_obs_device,
@@ -195,10 +205,6 @@ class GiftingGraphRunner(GraphRunner):
             )
 
             graph_obs = next_graph_obs
-
-            if done:
-                graph_obs, infos = self.env.reset()
-                break
 
         self._current_obs = graph_obs
         self._current_infos = infos

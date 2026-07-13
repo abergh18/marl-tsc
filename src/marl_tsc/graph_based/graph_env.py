@@ -33,14 +33,17 @@ class GraphTrafficEnv:
         config_file,
         network_file,
         possible_agents,
+        sumo_env=None,      # <-- ADD: accept pre-wrapped env
         **env_kwargs,
     ):
-
-        self.env = SumoTrafficEnv(
-            config_file,
-            possible_agents=possible_agents,
-            **env_kwargs,
-        )
+        if sumo_env is not None:
+            self.env = sumo_env
+        else:
+            self.env = SumoTrafficEnv(
+                config_file,
+                possible_agents=possible_agents,
+                **env_kwargs,
+            )
 
         self.topology = GraphBuilder(
             network_file

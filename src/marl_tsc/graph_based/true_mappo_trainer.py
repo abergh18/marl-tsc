@@ -83,7 +83,8 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
         transitions = self.runner.collect_rollout(
             num_steps=self.rollout_steps,
         )
-
+        #print(transitions[0].reward_dict.keys())
+        #print(self.env.agent_ids)
         rollout_batch = GraphRollout.from_transitions(
             transitions,
             self.env.agent_ids,
@@ -178,12 +179,12 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
                     )
                     old_gifting_log_probs = rollout_batch.gifting_log_probs[t]
 
-                    new_gifting_log_probs, gifting_ent = (
-                        self.policy.gifting_head.evaluate(
-                            output.encoder_output.node_embeddings,
-                            gifting_actions_t,
-                        )
+                    gifting_logits = self.policy.branches[1](
+                        output.encoder_output.node_embeddings
                     )
+                    dist_g = Categorical(logits=gifting_logits)
+                    new_gifting_log_probs = dist_g.log_prob(gifting_actions_t)
+                    gifting_ent = dist_g.entropy().mean()
 
                     gifting_ratio = torch.exp(
                         new_gifting_log_probs - old_gifting_log_probs
