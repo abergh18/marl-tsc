@@ -2,18 +2,18 @@
 true_mappo_trainer.py
 
 True MAPPO trainer using a graph-based actor and centralised critic.
+Supports optional zero-sum gifting via separate gifting PPO loss.
 
-What distinguishes this from graph_mappo_trainer.py (soon to be graph_ippo_trainer.py)
----------------------------------------------------------------------------------------
-- Critic is centralised: a single V(s_t) computed from the full global state,
-  shared across all agents. This is the defining feature of MAPPO.
-- Actor path is unchanged: per-agent logits from local graph embeddings.
-- Value loss regresses the scalar V(s_t) against mean return across agents.
-- collect_batch() is overridden here to use global_value for GAE bootstrap,
-  keeping BaseGraphTrainer untouched.
-
-Reference: Yu et al. (2021) "The Surprising Effectiveness of PPO in
-Cooperative Multi-Agent Games"
+What changed from original
+---------------------------
+- Gifting loss computed and logged separately from traffic loss when
+  rollout_batch.gifting_log_probs is not None.
+- Gifting clip fraction tracked independently.
+- Gifting stats aggregated from rollout_batch.gifting_stats and added
+  to returned stats dict.
+- Non-gifting runs are completely unaffected — all gifting logic is
+  gated on rollout_batch.gifting_log_probs is not None.
+- gifting_entropy_coef added as separate hyperparameter.
 """
 
 from __future__ import annotations
@@ -34,6 +34,14 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
     Actor  : per-agent, consumes local graph embeddings (GAT encoder output)
     Critic : centralised MLP, consumes global_state = flatten(all agent obs)
     Update : PPO clipping + entropy regularisation, multi-epoch
+
+    Gifting support
+    ---------------
+    When the rollout batch contains gifting_log_probs (i.e. collected by
+    GiftingGraphRunner), a separate gifting PPO loss is computed and added
+    to the total loss. The gifting head is trained jointly with the actor
+    and critic but its gradient signal is tracked independently.
+    Non-gifting runs are completely unaffected.
     """
 
     def __init__(
@@ -46,6 +54,7 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
         gamma=0.99,
         clip_ratio=0.2,
         entropy_coef=0.01,
+        gifting_entropy_coef=0.01,
         value_coef=0.5,
         max_grad_norm=0.5,
         update_epochs=3,
@@ -61,17 +70,15 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
         self.gamma = gamma
         self.clip_ratio = clip_ratio
         self.entropy_coef = entropy_coef
+        self.gifting_entropy_coef = gifting_entropy_coef
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         self.update_epochs = update_epochs
 
-    # ── Override collect_batch to use centralised global_value ───────────────
-
     def collect_batch(self):
         """
-        Identical to BaseGraphTrainer.collect_batch except bootstrap_value
-        comes from policy.global_value (centralised critic) rather than
-        policy.value (per-agent critic heads).
+        Override to use global_value for GAE bootstrap.
+        Identical to base except bootstrap uses global_value.
         """
         transitions = self.runner.collect_rollout(
             num_steps=self.rollout_steps,
@@ -86,10 +93,6 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
 
         with torch.no_grad():
             bootstrap_output = self.policy(last_observation)
-
-            # Centralised critic produces a single scalar V(s).
-            # Expand to (num_agents,) so AdvantageEstimator.compute_gae
-            # receives the shape it expects.
             num_agents = len(self.env.agent_ids)
             bootstrap_value = bootstrap_output.global_value.expand(num_agents)
 
@@ -102,36 +105,35 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
 
         return rollout_batch, advantage_batch
 
-    # ── PPO update ────────────────────────────────────────────────────────────
-
     def update(self, rollout_batch, advantage_batch):
         """
-        PPO update step.
+        PPO update step with optional separate gifting loss.
 
         Parameters
         ----------
         rollout_batch : RolloutBatch
-            Collected transitions. rollout_batch.observations are
-            GraphObservation objects containing both .graph (for actor)
-            and .global_state (for centralised critic).
         advantage_batch : AdvantageBatch
-            Computed advantages and returns.
 
         Returns
         -------
         dict
-            Training statistics.
+            Training statistics including gifting metrics when applicable.
         """
         advantages = advantage_batch.advantages    # (T, num_agents)
         returns = advantage_batch.returns          # (T, num_agents)
 
-        # Normalise across all agents and timesteps
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        is_gifting = rollout_batch.gifting_log_probs is not None
 
         actor_losses = []
         value_losses = []
         entropy_losses = []
         policy_clip_fracs = []
+
+        gifting_losses = []
+        gifting_entropy_losses = []
+        gifting_clip_fracs = []
 
         for epoch in range(self.update_epochs):
 
@@ -142,13 +144,13 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
                 actions = rollout_batch.actions[t].to(output.logits.device)
                 old_log_probs = rollout_batch.log_probs[t]
 
-                # ── Actor ─────────────────────────────────────────────────────
+                # ── Traffic actor loss ────────────────────────────────────────
                 dist = Categorical(logits=output.logits)
-                new_log_probs = dist.log_prob(actions)   # (num_agents,)
+                new_log_probs = dist.log_prob(actions)
                 entropy = dist.entropy().mean()
 
                 ratio = torch.exp(new_log_probs - old_log_probs)
-                adv_t = advantages[t]                    # (num_agents,)
+                adv_t = advantages[t]
 
                 surr1 = ratio * adv_t
                 surr2 = torch.clamp(
@@ -159,24 +161,61 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
 
                 actor_loss = -torch.min(surr1, surr2).mean()
 
-                # ── Centralised critic ────────────────────────────────────────
-                # output.global_value : (1,)  scalar V(s_t)
-                # returns[t]          : (num_agents,) per-agent returns
-                #
-                # Regress V(s_t) against mean return across agents.
-                # Valid for homogeneous agents sharing the same reward scale,
-                # which holds for the 4x4 SUMO grid.
-                target_return = returns[t].mean()        # scalar
+                # ── Centralised critic loss ───────────────────────────────────
+                target_return = returns[t].mean()
                 value_loss = F.mse_loss(
-                    output.global_value.squeeze(),       # scalar
+                    output.global_value.squeeze(),
                     target_return,
                 )
+
+                # ── Gifting loss (when applicable) ────────────────────────────
+                gifting_loss = torch.tensor(0.0, device=output.logits.device)
+                gifting_entropy = torch.tensor(0.0, device=output.logits.device)
+
+                if is_gifting:
+                    gifting_actions_t = rollout_batch.gifting_actions[t].to(
+                        output.logits.device
+                    )
+                    old_gifting_log_probs = rollout_batch.gifting_log_probs[t]
+
+                    new_gifting_log_probs, gifting_ent = (
+                        self.policy.gifting_head.evaluate(
+                            output.encoder_output.node_embeddings,
+                            gifting_actions_t,
+                        )
+                    )
+
+                    gifting_ratio = torch.exp(
+                        new_gifting_log_probs - old_gifting_log_probs
+                    )
+
+                    g_surr1 = gifting_ratio * adv_t
+                    g_surr2 = torch.clamp(
+                        gifting_ratio,
+                        1.0 - self.clip_ratio,
+                        1.0 + self.clip_ratio,
+                    ) * adv_t
+
+                    gifting_loss = -torch.min(g_surr1, g_surr2).mean()
+                    gifting_entropy = gifting_ent
+
+                    with torch.no_grad():
+                        g_clip_frac = (
+                            (torch.abs(gifting_ratio - 1.0) > self.clip_ratio)
+                            .float()
+                            .mean()
+                        )
+                    gifting_losses.append(gifting_loss.detach())
+                    gifting_entropy_losses.append(gifting_entropy.detach())
+                    gifting_clip_fracs.append(g_clip_frac.detach())
 
                 # ── Total loss ────────────────────────────────────────────────
                 total_loss = (
                     actor_loss
                     + self.value_coef * value_loss
                     - self.entropy_coef * entropy
+                    + gifting_loss
+                    - self.gifting_entropy_coef * gifting_entropy
                 )
 
                 self.optimizer.zero_grad()
@@ -199,7 +238,26 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
                 entropy_losses.append(entropy.detach())
                 policy_clip_fracs.append(clip_frac.detach())
 
-        return {
+        # ── Aggregate gifting stats from rollout ──────────────────────────────
+        mean_gift_fraction = 0.0
+        gift_rate = 0.0
+        mean_gift_amount = 0.0
+
+        if is_gifting and rollout_batch.gifting_stats:
+            mean_gift_fraction = float(
+                sum(s["mean_gift_fraction"] for s in rollout_batch.gifting_stats)
+                / len(rollout_batch.gifting_stats)
+            )
+            gift_rate = float(
+                sum(s["gift_rate"] for s in rollout_batch.gifting_stats)
+                / len(rollout_batch.gifting_stats)
+            )
+            mean_gift_amount = float(
+                sum(s["mean_gift_amount"] for s in rollout_batch.gifting_stats)
+                / len(rollout_batch.gifting_stats)
+            )
+
+        stats = {
             "actor_loss": float(torch.stack(actor_losses).mean()),
             "critic_loss": float(torch.stack(value_losses).mean()),
             "entropy_loss": float(torch.stack(entropy_losses).mean()),
@@ -208,3 +266,15 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
             "rollout_length": len(rollout_batch.observations),
             "update_epochs": self.update_epochs,
         }
+
+        if is_gifting:
+            stats.update({
+                "gifting_loss": float(torch.stack(gifting_losses).mean()),
+                "gifting_entropy_loss": float(torch.stack(gifting_entropy_losses).mean()),
+                "gifting_clip_fraction": float(torch.stack(gifting_clip_fracs).mean()),
+                "mean_gift_fraction": mean_gift_fraction,
+                "gift_rate": gift_rate,
+                "mean_gift_amount": mean_gift_amount,
+            })
+
+        return stats
