@@ -187,6 +187,7 @@ def train_mappo(
     max_steps=1000,
     seed=42,
     env_kwargs=None,
+    use_peer_reward=True,
 ):
     """Train a shared-actor / centralised-critic MAPPO baseline with peer rewarding."""
 
@@ -213,7 +214,8 @@ def train_mappo(
     )
     
     # Apply peer rewarding for MAPPO training
-    env = PeerRewardingWrapper(env, division=10)
+    if use_peer_reward:
+        env = PeerRewardingWrapper(env, division=10)
     observations, infos = env.reset(seed=seed)
     agent_ids = tuple(traffic_light_ids or env.agents)
     
@@ -497,7 +499,8 @@ def train_mappo(
                 "episodes_completed": episode_index,
             }
         )
-
+        
+    policy_label = "mappo_peer_reward" if use_peer_reward else "mappo"
     model = MappoModel(
         actor=actor,
         critic=critic,
@@ -505,7 +508,7 @@ def train_mappo(
         obs_dim=obs_dim,
         action_dims=action_dims,
         config={
-            "algorithm_name": "mappo",
+            "algorithm_name": policy_label,
             "traffic_light_ids": list(agent_ids),
             "obs_dim": obs_dim,
             "action_dims": action_dims,
@@ -529,7 +532,7 @@ def train_mappo(
     )
 
     output_dir = Path(output_dir)
-    model_path = output_dir / "models" / "mappo.pt"
+    model_path = output_dir / "models" / f"{policy_label}.pt"
     model_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
