@@ -355,7 +355,7 @@ def train_mappo(
                     dist_s = None
                 
                 act_t = dist_t.sample()
-                act_s = dist_s.sample()
+                act_s = dist_s.sample() if dist_s is not None else torch.zeros_like(act_t)
                 
                 # Sum the log probabilities from both branches
                 log_probs_tensor = dist_t.log_prob(act_t) + dist_s.log_prob(act_s)
