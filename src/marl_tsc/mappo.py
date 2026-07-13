@@ -43,40 +43,6 @@ def _mask_logits(logits, mask):
     return torch.where(mask > 0.5, logits, torch.full_like(logits, very_negative))
 
 
-class RunningMeanStd:
-    """Welford-style running statistics over a stream of scalar values.
-
-    Used to normalize critic targets so the value head only ever sees roughly
-    zero-mean, unit-variance returns; predictions are denormalized when fed
-    back into GAE so advantages keep their real-world scale.
-    """
-
-    def __init__(self) -> None:
-        self.mean = 0.0
-        self.var = 1.0
-        self.count = 1e-4
-
-    def update(self, batch: np.ndarray) -> None:
-        batch = np.asarray(batch, dtype=np.float64).reshape(-1)
-        n = batch.size
-        if n == 0:
-            return
-        batch_mean = float(batch.mean())
-        batch_var = float(batch.var())
-        delta = batch_mean - self.mean
-        new_count = self.count + n
-        self.mean = self.mean + delta * n / new_count
-        m_a = self.var * self.count
-        m_b = batch_var * n
-        m2 = m_a + m_b + (delta ** 2) * self.count * n / new_count
-        self.var = m2 / new_count
-        self.count = new_count
-
-    @property
-    def std(self) -> float:
-        return float(np.sqrt(max(self.var, 1e-8)))
-
-
 def _compute_gae(
     rewards: np.ndarray,
     values: np.ndarray,
@@ -118,11 +84,20 @@ class MappoModel:
         observation: np.ndarray,
         mask: np.ndarray | None = None,
         deterministic: bool = True,
+        agent_index: int = 0,
     ) -> int:
         import torch
         from torch.distributions import Categorical
 
-        obs_tensor = torch.as_tensor(np.asarray(observation, dtype=np.float32), dtype=torch.float32, device=self.device)
+        observation = np.asarray(observation, dtype=np.float32)
+        agent_identity = np.zeros(len(self.traffic_light_ids), dtype=np.float32)
+        agent_identity[agent_index] = 1.0
+        actor_observation = np.concatenate([observation, agent_identity])
+        obs_tensor = torch.as_tensor(
+            actor_observation,
+            dtype=torch.float32,
+            device=self.device,
+        )
 
         with torch.no_grad():
             logits = self.actor(obs_tensor.unsqueeze(0)).squeeze(0)
@@ -143,13 +118,16 @@ class MappoModel:
         deterministic: bool = True,
     ) -> dict[str, int]:
         actions: dict[str, int] = {}
-        for agent_id in self.traffic_light_ids:
+        for agent_index, agent_id in enumerate(self.traffic_light_ids):
             mask = None
             if infos is not None:
                 info = infos.get(agent_id) or {}
                 mask = info.get("action_mask")
             actions[agent_id] = self._act_single(
-                observations[agent_id], mask=mask, deterministic=deterministic
+                observations[agent_id],
+                mask=mask,
+                deterministic=deterministic,
+                agent_index=agent_index,
             )
         return actions
 
@@ -210,16 +188,8 @@ def train_mappo(
     critic_hidden_size = 256
 
     class Actor(nn.Module):
-        def __init__(
-            self,
-            obs_size: int,
-            action_size: int,
-            phase_queue_start: int | None = None,
-        ) -> None:
+        def __init__(self, obs_size: int, action_size: int) -> None:
             super().__init__()
-            self.action_size = action_size
-            self.phase_queue_start = phase_queue_start
-            self.queue_logit_scale = nn.Parameter(torch.tensor(2.0))
             self.net = nn.Sequential(
                 nn.Linear(obs_size, hidden_size),
                 nn.ReLU(),
@@ -227,15 +197,11 @@ def train_mappo(
                 nn.ReLU(),
                 nn.Linear(hidden_size, action_size),
             )
+            nn.init.zeros_(self.net[-1].weight)
+            nn.init.zeros_(self.net[-1].bias)
 
         def forward(self, obs: torch.Tensor) -> torch.Tensor:
-            logits = self.net(obs)
-            if self.phase_queue_start is not None:
-                phase_queues = obs[
-                    ..., self.phase_queue_start : self.phase_queue_start + self.action_size
-                ]
-                logits = logits + self.queue_logit_scale.clamp(0.0, 5.0) * phase_queues
-            return logits
+            return self.net(obs)
 
     class Critic(nn.Module):
         def __init__(self, central_obs_size: int) -> None:
@@ -251,24 +217,19 @@ def train_mappo(
         def forward(self, central_obs: torch.Tensor) -> torch.Tensor:
             return self.net(central_obs)
 
-    phase_queue_start = None
-    if env_options.get("include_phase_queue_features", True):
-        phase_queue_start = int(env.max_lanes_per_tls) + 2
-
-    actor = Actor(obs_dim, action_dim, phase_queue_start=phase_queue_start).to(device)
+    actor_obs_dim = obs_dim + num_agents
+    actor = Actor(actor_obs_dim, action_dim).to(device)
     critic = Critic(obs_dim * num_agents).to(device)
-    learning_rate = 1e-4
+    learning_rate = 3e-4
     optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=learning_rate)
 
     gamma = 0.99
     gae_lambda = 0.95
     clip_coef = 0.2
     update_epochs = 4
-    entropy_coef = 0.001
+    entropy_coef = 0.005
     value_coef = 0.5
-    local_reward_weight = 1.0
-
-    value_norm = RunningMeanStd()
+    local_reward_weight = 0.5
 
     history: list[dict[str, Any]] = []
     global_steps = 0
@@ -290,11 +251,13 @@ def train_mappo(
 
         while len(rollout_rewards) < rollout_steps and global_steps < total_timesteps:
             local_obs = _stack_agent_observations(observations, agent_ids)
+            agent_identity = np.eye(num_agents, dtype=np.float32)
+            actor_obs = np.concatenate([local_obs, agent_identity], axis=1)
             central_obs = local_obs.reshape(-1)
             mask_array = _stack_agent_masks(infos, agent_ids, action_dim)
 
             with torch.no_grad():
-                local_obs_tensor = torch.as_tensor(local_obs, dtype=torch.float32, device=device)
+                local_obs_tensor = torch.as_tensor(actor_obs, dtype=torch.float32, device=device)
                 central_obs_tensor = torch.as_tensor(central_obs, dtype=torch.float32, device=device)
                 mask_tensor = torch.as_tensor(mask_array, dtype=torch.float32, device=device)
                 logits = actor(local_obs_tensor)
@@ -314,15 +277,13 @@ def train_mappo(
             blended_rewards = local_reward_weight * local_rewards + (1.0 - local_reward_weight) * global_reward
             done = bool(any(terminations.values()) or any(truncations.values()))
 
-            value_denorm = value_tensor.detach().cpu().numpy().astype(np.float32) * value_norm.std + value_norm.mean
-
-            rollout_local_obs.append(local_obs)
+            rollout_local_obs.append(actor_obs)
             rollout_central_obs.append(central_obs)
             rollout_actions.append(np.asarray(actions_tensor.cpu().tolist(), dtype=np.int64))
             rollout_log_probs.append(np.asarray(log_probs_tensor.cpu().tolist(), dtype=np.float32))
             rollout_masks.append(mask_array)
             rollout_rewards.append(blended_rewards)
-            rollout_values.append(value_denorm)
+            rollout_values.append(value_tensor.detach().cpu().numpy().astype(np.float32))
             rollout_dones.append(done)
 
             global_steps += 1
@@ -347,8 +308,7 @@ def train_mappo(
                 next_local_obs = _stack_agent_observations(observations, agent_ids)
                 next_central_obs = next_local_obs.reshape(-1)
                 next_central_obs_tensor = torch.as_tensor(next_central_obs, dtype=torch.float32, device=device)
-                raw_value = critic(next_central_obs_tensor).detach().cpu().numpy().astype(np.float32)
-                last_value = raw_value * value_norm.std + value_norm.mean
+                last_value = critic(next_central_obs_tensor).detach().cpu().numpy().astype(np.float32)
 
         rewards_array = np.asarray(rollout_rewards, dtype=np.float32)
         values_array = np.asarray(rollout_values, dtype=np.float32)
@@ -364,15 +324,12 @@ def train_mappo(
         )
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        value_norm.update(returns)
-        normalized_returns = (returns - value_norm.mean) / value_norm.std
-
         local_obs_batch = np.concatenate(rollout_local_obs, axis=0)
         action_batch = np.concatenate(rollout_actions, axis=0)
         old_log_prob_batch = np.concatenate(rollout_log_probs, axis=0)
         mask_batch = np.concatenate(rollout_masks, axis=0)
         advantage_batch = advantages.reshape(-1)
-        return_batch = torch.as_tensor(normalized_returns, dtype=torch.float32, device=device)
+        return_batch = torch.as_tensor(returns, dtype=torch.float32, device=device)
         central_obs_batch = torch.as_tensor(
             np.asarray(rollout_central_obs),
             dtype=torch.float32,
@@ -406,7 +363,7 @@ def train_mappo(
             entropy_loss = dist.entropy().mean()
 
             predicted_values = critic(central_obs_batch)
-            value_loss = F.mse_loss(predicted_values, return_batch)
+            value_loss = F.smooth_l1_loss(predicted_values, return_batch)
             loss = policy_loss + value_coef * value_loss - entropy_coef * entropy_loss
 
             optimizer.zero_grad()
@@ -439,6 +396,7 @@ def train_mappo(
             "algorithm_name": "mappo",
             "traffic_light_ids": list(agent_ids),
             "obs_dim": obs_dim,
+            "actor_obs_dim": actor_obs_dim,
             "action_dim": action_dim,
             "num_agents": num_agents,
             "total_timesteps": total_timesteps,
@@ -453,7 +411,6 @@ def train_mappo(
             "entropy_coef": entropy_coef,
             "value_coef": value_coef,
             "local_reward_weight": local_reward_weight,
-            "phase_queue_start": phase_queue_start,
             "env_kwargs": env_options,
         },
         device=str(device),
@@ -466,9 +423,6 @@ def train_mappo(
         {
             "actor_state_dict": actor.state_dict(),
             "critic_state_dict": critic.state_dict(),
-            "value_norm_mean": value_norm.mean,
-            "value_norm_var": value_norm.var,
-            "value_norm_count": value_norm.count,
             "config": model.config,
         },
         model_path,

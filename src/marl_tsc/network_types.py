@@ -75,8 +75,9 @@ class CityNetwork(NetworkType):
 
     city_name: str = "Bristol, UK"
     radius: int = 150
-    lane_number: int = 2
+    lane_number: int | None = None
     left_hand: bool = True
+    connected_components: int = 1
 
     def generate(
         self,
@@ -84,6 +85,11 @@ class CityNetwork(NetworkType):
         network_file: Path,
         run_command: RunCommand,
     ) -> None:
+        if self.lane_number is not None and self.lane_number < 1:
+            raise ValueError("lane_number must be at least 1 when specified.")
+        if self.connected_components < 1:
+            raise ValueError("connected_components must be at least 1.")
+
         latitude, longitude = self._geocode_city()
         osm_file = output_dir / "city.osm.xml"
         self._download_osm(latitude, longitude, osm_file)
@@ -94,20 +100,20 @@ class CityNetwork(NetworkType):
             str(osm_file),
             "--output-file",
             str(network_file),
-            "--junctions.join",
-            "--edges.join",
             "--geometry.remove",
-            "--geometry.min-dist",
-            "5",
-            "--roundabouts.guess",
-            "--no-turnarounds",
-            "--tls.guess",
+            "--ramps.guess",
+            "--junctions.join",
+            "--tls.guess-signals",
+            "--tls.discard-simple",
             "--tls.join",
-            "--default.lanenumber",
-            str(self.lane_number),
-            "--default.lanewidth",
-            "3.2",
+            "--output.original-names",
+            "--output.street-names",
+            "--keep-edges.components",
+            str(self.connected_components),
+            "--no-turnarounds",
         ]
+        if self.lane_number is not None:
+            command.extend(["--default.lanenumber", str(self.lane_number)])
         if self.left_hand:
             command.append("--lefthand")
 
