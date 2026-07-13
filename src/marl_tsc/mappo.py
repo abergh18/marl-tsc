@@ -226,7 +226,11 @@ def train_mappo(
     obs_dim = int(np.asarray(observations[agent_ids[0]], dtype=np.float32).shape[0])
     
     # Extract multiple action dimensions for the two branches
-    action_dims = env.action_space(agent_ids[0]).nvec.tolist()
+    action_space = env.action_space(agent_ids[0])
+    if hasattr(action_space, 'nvec'):
+        action_dims = action_space.nvec.tolist()
+    else:
+        action_dims = [action_space.n]
     total_action_dim = sum(action_dims)
     num_agents = len(agent_ids)
     
