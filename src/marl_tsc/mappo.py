@@ -346,10 +346,13 @@ def train_mappo(
                 s_mask = mask_tensor[:, traffic_dim:]
                 
                 masked_t_logits = _mask_logits(logits_list[0], t_mask)
-                masked_s_logits = _mask_logits(logits_list[1], s_mask)
-                
                 dist_t = Categorical(logits=masked_t_logits)
-                dist_s = Categorical(logits=masked_s_logits)
+                
+                if len(action_dims) > 1:
+                    masked_s_logits = _mask_logits(logits_list[1], s_mask)
+                    dist_s = Categorical(logits=masked_s_logits)
+                else:
+                    dist_s = None
                 
                 act_t = dist_t.sample()
                 act_s = dist_s.sample()
@@ -460,10 +463,13 @@ def train_mappo(
             s_mask = mask_batch_tensor[:, traffic_dim:]
             
             masked_t_logits = _mask_logits(logits_list[0], t_mask)
-            masked_s_logits = _mask_logits(logits_list[1], s_mask)
-            
             dist_t = Categorical(logits=masked_t_logits)
-            dist_s = Categorical(logits=masked_s_logits)
+            
+            if len(action_dims) > 1:
+                masked_s_logits = _mask_logits(logits_list[1], s_mask)
+                dist_s = Categorical(logits=masked_s_logits)
+            else:
+                dist_s = None
             
             # Read the actions back out from the batch array
             act_t = actor_action_batch[:, 0]
