@@ -43,6 +43,7 @@ class SimulationGenerator:
         allow_fringe: bool = True,
         random_depart: bool = True,
         seed: int = 42,
+        self.min_distance = min_distance,
     ) -> None:
         """Create a SUMO grid network, traffic demand, routes, and config."""
 
@@ -103,7 +104,10 @@ class SimulationGenerator:
 
         if self.random_depart:
             argv.append("--random-depart")
-
+            
+        if self.min_distance is not None:
+            argv.extend(["--min-distance", str(self.min_distance)])
+            
         return argv
 
     def _run_random_trips(self, argv: list[str]) -> None:
