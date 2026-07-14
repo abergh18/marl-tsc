@@ -230,21 +230,34 @@ class SimulationGenerator:
         orig_period = self.trip_period
         orig_trips = self.trips_filename
     
-        # Generate peak trips
+        # Generate peak trips WITH vehicle types
         self.trips_filename = "peak.trips.xml"
         self.trip_begin = 0
         self.trip_end = peak_end
         self.trip_period = peak_period
-        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
+        
+        argv = self._random_trips_argv(
+            trip_fringe_factor=self.trip_fringe_factor,
+            allow_fringe=self.allow_fringe,
+        )
         self._run_random_trips(argv)
     
-        # Generate off-peak trips
+        # Generate off-peak trips WITHOUT vehicle types
         self.trips_filename = "offpeak.trips.xml"
         self.trip_begin = peak_end
         self.trip_end = orig_end
         self.trip_period = offpeak_period
-        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
+        
+        old_vtypes = self.vtypes_file
+        self.vtypes_file = None
+        
+        argv = self._random_trips_argv(
+            trip_fringe_factor=self.trip_fringe_factor,
+            allow_fringe=self.allow_fringe,
+        )
         self._run_random_trips(argv)
+        
+        self.vtypes_file = old_vtypes
     
         # Restore originals
         self.trip_begin = orig_begin
