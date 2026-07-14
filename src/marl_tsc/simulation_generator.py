@@ -43,6 +43,7 @@ class SimulationGenerator:
         allow_fringe: bool = True,
         random_depart: bool = True,
         seed: int = 42,
+        min_distance: int | None = None,
         vtypes_file: str | Path | None = None,
     ) -> None:
         """Create a SUMO grid network, traffic demand, routes, and config."""
