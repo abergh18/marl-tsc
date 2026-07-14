@@ -43,7 +43,7 @@ class SimulationGenerator:
         allow_fringe: bool = True,
         random_depart: bool = True,
         seed: int = 42,
-        self.min_distance = min_distance,
+        vtypes_file: str | Path | None = None,
     ) -> None:
         """Create a SUMO grid network, traffic demand, routes, and config."""
 
@@ -64,6 +64,8 @@ class SimulationGenerator:
         self.allow_fringe = allow_fringe
         self.random_depart = random_depart
         self.seed = seed
+        self.min_distance = min_distance
+        self.vtypes_file = Path(vtypes_file) if vtypes_file else None
 
         sumo_home = os.environ.get("SUMO_HOME")
         if not sumo_home:
@@ -108,6 +110,13 @@ class SimulationGenerator:
         if self.min_distance is not None:
             argv.extend(["--min-distance", str(self.min_distance)])
             
+        if self.vtypes_file is not None:
+            argv.extend(["--additional-files", str(self.vtypes_file)])
+            argv.extend(["--vehicle-class", "passenger"])
+
+        argv.extend(["--edge-permission", "passenger"])
+        argv.extend(["--speed-exponent", "2"])
+        
         return argv
 
     def _run_random_trips(self, argv: list[str]) -> None:
@@ -206,6 +215,52 @@ class SimulationGenerator:
             )
             self._run_random_trips(fallback_argv)
 
+        return self.routes_file
+
+    def generate_peak_trips(self, peak_end: int = 1800, peak_period: float = 1.0, offpeak_period: float = 3.0) -> Path:
+        """Generate realistic peak/off-peak demand pattern."""
+    
+        peak_trips = self.output_dir / "peak.trips.xml"
+        offpeak_trips = self.output_dir / "offpeak.trips.xml"
+    
+        # Save originals
+        orig_begin = self.trip_begin
+        orig_end = self.trip_end
+        orig_period = self.trip_period
+        orig_trips = self.trips_filename
+    
+        # Generate peak trips
+        self.trips_filename = "peak.trips.xml"
+        self.trip_begin = 0
+        self.trip_end = peak_end
+        self.trip_period = peak_period
+        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
+        self._run_random_trips(argv)
+    
+        # Generate off-peak trips
+        self.trips_filename = "offpeak.trips.xml"
+        self.trip_begin = peak_end
+        self.trip_end = orig_end
+        self.trip_period = offpeak_period
+        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
+        self._run_random_trips(argv)
+    
+        # Restore originals
+        self.trip_begin = orig_begin
+        self.trip_end = orig_end
+        self.trip_period = orig_period
+        self.trips_filename = orig_trips
+    
+        # Merge using duarouter
+        subprocess.run([
+            "duarouter",
+            "-n", str(self.network_file),
+            "--route-files", f"{peak_trips},{offpeak_trips}",
+            "-o", str(self.routes_file),
+            "--ignore-errors",
+            "--seed", str(self.seed),
+        ], check=True)
+    
         return self.routes_file
 
     def generate_config(self) -> Path:
