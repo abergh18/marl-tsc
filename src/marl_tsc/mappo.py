@@ -306,7 +306,7 @@ def train_mappo(
     update_epochs = 10
     entropy_coef = 0.01
     value_coef = 0.5
-    local_reward_weight = 0.8
+    local_reward_weight = 0.7
 
     value_norm = RunningMeanStd()
 
