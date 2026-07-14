@@ -234,7 +234,7 @@ def train_mappo(
     total_action_dim = sum(action_dims)
     num_agents = len(agent_ids)
     
-    hidden_size = 128
+    hidden_size = 256
     critic_hidden_size = 256
 
     class Actor(nn.Module):
@@ -335,6 +335,7 @@ def train_mappo(
 
             with torch.no_grad():
                 local_obs_tensor = torch.as_tensor(local_obs, dtype=torch.float32, device=device)
+                local_obs_tensor = (local_obs_tensor - local_obs_tensor.mean(dim=-1, keepdim=True)) / (local_obs_tensor.std(dim=-1, keepdim=True) + 1e-8)
                 central_obs_tensor = torch.as_tensor(central_obs, dtype=torch.float32, device=device)
                 mask_tensor = torch.as_tensor(mask_array, dtype=torch.float32, device=device)
                 
