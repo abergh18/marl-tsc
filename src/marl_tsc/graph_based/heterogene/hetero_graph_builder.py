@@ -326,20 +326,17 @@ class HeteroGraphBuilder:
         )
 
     def _connection_features(self, edge) -> np.ndarray:
-        """
-        Extract and normalise static features for a single connection edge.
-        """
         priority    = edge.getPriority() / _MAX_PRIORITY
         num_lanes   = edge.getLaneNumber() / _MAX_LANES
         length      = min(edge.getLength(), _MAX_LENGTH) / _MAX_LENGTH
         speed_limit = min(edge.getSpeed(), _MAX_SPEED) / _MAX_SPEED
 
-        # Direction — take the most common direction across all connections
-        # on this edge (most edges have one dominant direction)
-        directions = [
-            conn.getDirection()
-            for conn in edge.getConnections()
-        ]
+        # Direction — gather from all outgoing connections across all lanes
+        directions = []
+        for lane in edge.getLanes():
+            for conn in lane.getOutgoing():
+                directions.append(conn.getDirection())
+
         dir_counts = {}
         for d in directions:
             dir_counts[d] = dir_counts.get(d, 0) + 1
@@ -348,7 +345,6 @@ class HeteroGraphBuilder:
             dominant_dir, (1, 0, 0, 0)
         )
 
-        # Signalisation
         is_signalised = float(edge.getTLS() is not None)
 
         return np.array([

@@ -108,25 +108,28 @@ class HeteroGraphEnv:
         trained end-to-end with the rest of the policy.
         """
         x = torch.tensor(
-            np.stack([
-                observations[agent]
-                for agent in self.agent_ids
-            ]),
-            dtype=torch.float32,
-        )                                       # (N, intersection_obs_dim)
+                np.stack([
+                    observations[agent]
+                    for agent in self.agent_ids
+                ]),
+                dtype=torch.float32,
+            )
 
-        global_state = x.flatten()             # (N * intersection_obs_dim,)
+            global_state = x.flatten()
 
-        return GraphObservation(
-            graph=Data(
+            graph = Data(
                 x=x,
-                connection_x=self._connection_x,
                 edge_index=self._edge_index,
-                agent_mask=self._agent_mask,
-            ),
-            agent_ids=self.agent_ids,
-            global_state=global_state,
-        )
+            )
+            # Set custom attributes explicitly after construction
+            graph.connection_x = self._connection_x
+            graph.agent_mask   = self._agent_mask
+
+            return GraphObservation(
+                graph=graph,
+                agent_ids=self.agent_ids,
+                global_state=global_state,
+            )
 
     # ---- PettingZoo-style interface --------------------------------------
 
