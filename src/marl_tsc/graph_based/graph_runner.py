@@ -95,22 +95,19 @@ class GraphRunner:
         self.last_observation = None
 
     def _move_graph_obs_to_device(self, graph_obs):
-        """
-        Move graph observation tensors to the policy's device.
-
-        GraphTrafficEnv returns observations on CPU. The policy may be on GPU.
-        This method moves graph_obs.graph (a torch_geometric.data.Data object)
-        to the same device as the policy.
-        """
         device = next(self.policy.parameters()).device
 
-        # Move node features and edge indices to device
         graph = Data(
             x=graph_obs.graph.x.to(device),
             edge_index=graph_obs.graph.edge_index.to(device),
         )
 
-        # Recreate GraphObservation with moved tensors
+        # Carry through het graph attributes if present
+        if hasattr(graph_obs.graph, 'connection_x'):
+            graph.connection_x = graph_obs.graph.connection_x.to(device)
+        if hasattr(graph_obs.graph, 'agent_mask'):
+            graph.agent_mask = graph_obs.graph.agent_mask.to(device)
+
         from marl_tsc.graph_based.graph_types import GraphObservation
 
         return GraphObservation(
