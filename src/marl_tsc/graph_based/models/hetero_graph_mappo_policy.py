@@ -57,7 +57,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from .true_mappo_policy import CentralisedCritic, MAPPOPolicyOutput
-from .hetero_graph_builder import CONNECTION_FEAT_DIM
+from ..heterogene.hetero_graph_builder import CONNECTION_FEAT_DIM
 
 
 class HeteroGraphMAPPOPolicy(nn.Module):

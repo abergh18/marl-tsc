@@ -26,9 +26,9 @@ import numpy as np
 import torch
 from torch_geometric.data import Data
 
-from .graph_env import GraphObservation          # reuse existing dataclass
+from ..graph_env import GraphObservation          # reuse existing dataclass
 from .hetero_graph_builder import HeteroGraphBuilder
-from ..sumo_env import SumoTrafficEnv            # adjust import path as needed
+from ...traffic_env import SumoTrafficEnv            # adjust import path as needed
 
 
 class HeteroGraphEnv:

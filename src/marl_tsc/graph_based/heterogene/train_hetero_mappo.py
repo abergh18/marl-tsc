@@ -22,7 +22,7 @@ from pathlib import Path
 import torch
 import torch.optim
 
-from marl_tsc.graph_based.hetero_graph_env import HeteroGraphEnv
+from marl_tsc.graph_based.heterogene.hetero_graph_env import HeteroGraphEnv
 from marl_tsc.graph_based.true_mappo_trainer import TrueMAPPOTrainer
 from marl_tsc.graph_based.run_training import run_training
 from marl_tsc.graph_based.models.true_mappo_policy import CentralisedCritic
