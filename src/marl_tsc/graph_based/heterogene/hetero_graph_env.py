@@ -115,21 +115,21 @@ class HeteroGraphEnv:
                 dtype=torch.float32,
             )
 
-            global_state = x.flatten()
+        global_state = x.flatten()
 
-            graph = Data(
-                x=x,
-                edge_index=self._edge_index,
-            )
-            # Set custom attributes explicitly after construction
-            graph.connection_x = self._connection_x
-            graph.agent_mask   = self._agent_mask
+        graph = Data(
+            x=x,
+            edge_index=self._edge_index,
+        )
+        # Set custom attributes explicitly after construction
+        graph.connection_x = self._connection_x
+        graph.agent_mask   = self._agent_mask
 
-            return GraphObservation(
-                graph=graph,
-                agent_ids=self.agent_ids,
-                global_state=global_state,
-            )
+        return GraphObservation(
+            graph=graph,
+            agent_ids=self.agent_ids,
+            global_state=global_state,
+        )
 
     # ---- PettingZoo-style interface --------------------------------------
 
