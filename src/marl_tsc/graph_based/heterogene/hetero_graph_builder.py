@@ -1,26 +1,23 @@
 """
-hetero_graph_builder.py  — v2
+hetero_graph_builder.py  — v3
 
 Drop-in companion to GraphBuilder that enriches the intersection graph
 with connection nodes representing road segments between intersections.
 
-Changes from v1
+Changes from v2
 ---------------
-- Connection node traversal uses multi-hop BFS (up to max_hops) instead
-  of single-hop getOutgoing(). This captures tertiary, unclassified, and
-  residential connections between TLS junctions, not just direct primary
-  road links.
-- Connection node feature vector updated to combined B+C scheme (7 features)
-  capturing both bottleneck constraints and aggregate path characteristics.
-- max_hops exposed as constructor parameter.
+- Normalisation constants are now computed from the actual network file
+  at init time rather than hardcoded. Uses 95th percentile for length
+  and speed (robust to outlier edges), max for priority and lanes.
+  This ensures feature values stay in [0, 1] regardless of which network
+  is used — critical for transfer between cities.
+- _compute_norm_stats() added as a new method.
+- _MAX_* module-level constants removed.
 
 Node layout in the output Data object
 --------------------------------------
 Indices 0 .. N-1          : intersection (agent) nodes
 Indices N .. N+C-1        : connection nodes
-
-Both node types are projected to shared_dim so the existing homogeneous
-GAT encoder can be used unchanged.
 
 Connection node features (static, built once from .net.xml)
 ------------------------------------------------------------
@@ -49,11 +46,6 @@ from torch_geometric.data import Data
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 CONNECTION_FEAT_DIM = 7
-
-_MAX_PRIORITY  = 12.0
-_MAX_LENGTH    = 1500.0   # increased for multi-hop paths
-_MAX_SPEED     = 33.33
-_MAX_LANES     = 4.0
 
 
 # ── Dataclass ─────────────────────────────────────────────────────────────────
@@ -86,6 +78,9 @@ class HeteroGraphTopology:
     proximity_matrix
         Float tensor [N, N] — normalised proximity weights between agents,
         computed from path lengths. Useful for topology-aware reward sharing.
+    norm_stats
+        Dict of normalisation constants derived from this network.
+        Stored for inspection and logging.
     """
     agent_ids:           list
     node_index:          dict
@@ -96,6 +91,7 @@ class HeteroGraphTopology:
     num_connections:     int
     agent_mask:          torch.Tensor
     proximity_matrix:    torch.Tensor
+    norm_stats:          dict
 
 
 # ── Builder ───────────────────────────────────────────────────────────────────
@@ -115,8 +111,6 @@ class HeteroGraphBuilder:
         Shared embedding dimension. Both node types are projected here.
     max_hops : int
         Maximum BFS depth when searching for TLS-to-TLS connections.
-        max_hops=1 finds only direct single-edge connections.
-        max_hops=3 (default) finds connections via up to 3 road segments.
     """
 
     def __init__(
@@ -132,6 +126,9 @@ class HeteroGraphBuilder:
         self.max_hops             = max_hops
 
         self.net = readNet(str(self.network_file))
+
+        # Compute normalisation stats from this network before building topology
+        self._norm = self._compute_norm_stats()
 
         # Projection layers — included in HeteroGraphMAPPOPolicy.parameters()
         self.intersection_proj = nn.Linear(intersection_obs_dim, shared_dim)
@@ -149,17 +146,6 @@ class HeteroGraphBuilder:
         observations: dict,
         topology: Optional[HeteroGraphTopology] = None,
     ) -> Data:
-        """
-        Build a PyG Data object from current SUMO observations.
-
-        Returns
-        -------
-        Data with:
-            .x            raw intersection obs  (N, intersection_obs_dim)
-            .connection_x static connection feats (C, CONNECTION_FEAT_DIM)
-            .edge_index   combined het edge index (2, E)
-            .agent_mask   bool [N+C], True = intersection node
-        """
         if topology is None:
             topology = self.topology
 
@@ -180,11 +166,45 @@ class HeteroGraphBuilder:
 
         return graph
 
+    # ── Normalisation ─────────────────────────────────────────────────────
+
+    def _compute_norm_stats(self) -> dict:
+        """
+        Compute normalisation constants from the actual network file.
+
+        Uses max for priority and lanes (small integer ranges, no outlier risk).
+        Uses 95th percentile for length and speed (robust to outlier edges
+        such as motorway slips or internal connector edges).
+
+        All values floored at 1.0 to avoid division by zero on degenerate
+        networks.
+        """
+        priorities = []
+        lanes      = []
+        lengths    = []
+        speeds     = []
+
+        for edge in self.net.getEdges():
+            priorities.append(edge.getPriority())
+            lanes.append(edge.getLaneNumber())
+            lengths.append(edge.getLength())
+            speeds.append(edge.getSpeed())
+
+        stats = {
+            "max_priority": float(max(priorities)) if priorities else 1.0,
+            "max_lanes":    float(max(lanes))      if lanes      else 1.0,
+            "max_length":   float(np.percentile(lengths, 95)) if lengths else 1.0,
+            "max_speed":    float(np.percentile(speeds,  95)) if speeds  else 1.0,
+        }
+
+        # Floor at 1.0 to prevent division by zero
+        return {k: max(v, 1.0) for k, v in stats.items()}
+
     # ── Internal topology construction ────────────────────────────────────
 
     def _build_topology(self) -> HeteroGraphTopology:
-        tls_list  = list(self.net.getTrafficLights())
-        agent_ids = sorted(tls.getID() for tls in tls_list)
+        tls_list   = list(self.net.getTrafficLights())
+        agent_ids  = sorted(tls.getID() for tls in tls_list)
         node_index = {aid: idx for idx, aid in enumerate(agent_ids)}
         N = len(agent_ids)
 
@@ -195,8 +215,8 @@ class HeteroGraphBuilder:
         # ── Build connection feature matrix ───────────────────────────────
         connection_features_list = []
         connection_meta          = []
-        edges_src = []   # intersection index
-        edges_dst = []   # connection node index (offset by N)
+        edges_src = []
+        edges_dst = []
 
         for c_idx, conn in enumerate(raw_connections):
             feat = self._connection_features(conn)
@@ -219,10 +239,10 @@ class HeteroGraphBuilder:
 
         # Both directions for undirected-equivalent message passing
         all_src = (
-            edges_src           +   # intersection -> connection
-            [d for d in edges_dst] +   # connection -> intersection (reverse)
-            conn_to_int_src     +   # connection -> intersection
-            conn_to_int_dst         # intersection -> connection (reverse)
+            edges_src           +
+            [d for d in edges_dst] +
+            conn_to_int_src     +
+            conn_to_int_dst
         )
         all_dst = (
             edges_dst           +
@@ -246,7 +266,7 @@ class HeteroGraphBuilder:
 
         # ── Proximity matrix ──────────────────────────────────────────────
         proximity_matrix = self._build_proximity_matrix(
-            agent_ids, node_index, raw_connections, N
+            agent_ids, node_index, raw_connections
         )
 
         return HeteroGraphTopology(
@@ -259,16 +279,15 @@ class HeteroGraphBuilder:
             num_connections=C,
             agent_mask=agent_mask,
             proximity_matrix=proximity_matrix,
+            norm_stats=self._norm,
         )
 
     def _find_connections(self, agent_ids: list) -> list:
         """
         BFS from each TLS junction to find all reachable TLS junctions
-        within max_hops road segments.
-
-        Returns list of connection dicts with aggregated path features.
+        within max_hops road segments, accumulating path features.
         """
-        node_index = set(agent_ids)
+        node_index  = set(agent_ids)
         connections = []
         seen_pairs  = set()
 
@@ -277,7 +296,6 @@ class HeteroGraphBuilder:
             if start_node is None:
                 continue
 
-            # BFS: (current_node, hops, path_data)
             queue   = [(start_node, 0, None)]
             visited = {start_node.getID()}
 
@@ -294,7 +312,6 @@ class HeteroGraphBuilder:
                         continue
                     visited.add(to_node_id)
 
-                    # Accumulate path data
                     if path_data is None:
                         new_path = {
                             "edge_id":        out_edge.getID(),
@@ -330,10 +347,10 @@ class HeteroGraphBuilder:
                         if pair not in seen_pairs:
                             seen_pairs.add(pair)
                             connections.append({
-                                "from_tls":       start_tls_id,
-                                "to_tls":         to_tls_id,
-                                "mean_speed":     new_path["speed_sum"] /
-                                                  new_path["num_hops"],
+                                "from_tls":   start_tls_id,
+                                "to_tls":     to_tls_id,
+                                "mean_speed": new_path["speed_sum"] /
+                                              new_path["num_hops"],
                                 **{k: v for k, v in new_path.items()
                                    if k != "speed_sum"},
                             })
@@ -344,51 +361,48 @@ class HeteroGraphBuilder:
 
     def _connection_features(self, conn: dict) -> np.ndarray:
         """
-        Build normalised 7-feature vector for a connection node.
-
-        Features
-        --------
-        0  first_priority   priority of first edge / _MAX_PRIORITY
-        1  min_lanes        bottleneck lane count / _MAX_LANES
-        2  total_length     total path length / _MAX_LENGTH
-        3  min_speed        bottleneck speed / _MAX_SPEED
-        4  mean_speed       average speed / _MAX_SPEED
-        5  num_hops         hops / max_hops
-        6  any_signalised   binary
+        Build normalised 7-feature vector using network-derived stats.
+        All values clipped to [0, 1].
         """
-        return np.array([
-            conn["first_priority"] / _MAX_PRIORITY,
-            conn["min_lanes"]      / _MAX_LANES,
-            min(conn["total_length"], _MAX_LENGTH) / _MAX_LENGTH,
-            conn["min_speed"]      / _MAX_SPEED,
-            conn["mean_speed"]     / _MAX_SPEED,
+        norm = self._norm
+        return np.clip(np.array([
+            conn["first_priority"] / norm["max_priority"],
+            conn["min_lanes"]      / norm["max_lanes"],
+            conn["total_length"]   / norm["max_length"],
+            conn["min_speed"]      / norm["max_speed"],
+            conn["mean_speed"]     / norm["max_speed"],
             conn["num_hops"]       / self.max_hops,
             float(conn["any_signalised"]),
-        ], dtype=np.float32)
+        ], dtype=np.float32), 0.0, 1.0)
 
     def _build_proximity_matrix(
         self,
         agent_ids: list,
         node_index: dict,
         connections: list,
-        N: int,
     ) -> torch.Tensor:
         """
-        Build an N x N proximity matrix using exponential decay on
-        total path length.  proximity[i][j] = exp(-total_length / scale).
-
-        Diagonal is 0 (no self-gifting).
-        Unconnected pairs get proximity 0.
+        N x N proximity matrix using exponential decay on total path length.
+        proximity[i][j] = exp(-total_length / scale).
+        Diagonal is 0. Unconnected pairs are 0.
+        Scale is set to the median connected path length so decay is
+        network-relative rather than hardcoded.
         """
-        scale = 200.0   # decay scale in metres — tunable
+        N = len(agent_ids)
         matrix = torch.zeros(N, N)
+
+        if not connections:
+            return matrix
+
+        lengths = [c["total_length"] for c in connections]
+        scale   = float(np.median(lengths)) or 200.0
 
         for conn in connections:
             i = node_index[conn["from_tls"]]
             j = node_index[conn["to_tls"]]
-            w = np.exp(-conn["total_length"] / scale)
+            w = float(np.exp(-conn["total_length"] / scale))
             matrix[i][j] = w
-            matrix[j][i] = w   # symmetric
+            matrix[j][i] = w
 
         return matrix
 
