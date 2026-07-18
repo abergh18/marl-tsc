@@ -84,78 +84,123 @@ def _parse_tls_from_xml(network_file: str) -> dict:
 def _short(s, n=13):
     return s[:n] + "…" if len(s) > n else s
 
+def _get_tls_coord(net, tls_id):
+    if net.hasNode(tls_id):
+        return net.getNode(tls_id).getCoord()
+    parts = tls_id.replace("joinedS_", "").split("_cluster_")
+    for part in parts:
+        for candidate in [part] + part.split("_"):
+            if net.hasNode(candidate):
+                return net.getNode(candidate).getCoord()
+    return (0.0, 0.0)
+
+
+def _find_multihop_connections(net, tls_ids, max_hops=3):
+    node_index = set(tls_ids)
+    connections = []
+    seen_pairs = set()
+
+    for start_tls_id in tls_ids:
+        start_node = None
+        if net.hasNode(start_tls_id):
+            start_node = net.getNode(start_tls_id)
+        else:
+            parts = start_tls_id.replace("joinedS_", "").split("_cluster_")
+            for part in parts:
+                for candidate in [part] + part.split("_"):
+                    if net.hasNode(candidate):
+                        start_node = net.getNode(candidate)
+                        break
+                if start_node:
+                    break
+        if start_node is None:
+            continue
+
+        queue   = [(start_node, 0, None)]
+        visited = {start_node.getID()}
+
+        while queue:
+            current_node, hops, first_edge = queue.pop(0)
+            if hops >= max_hops:
+                continue
+
+            for out_edge in current_node.getOutgoing():
+                to_node    = out_edge.getToNode()
+                to_node_id = to_node.getID()
+
+                if to_node_id in visited:
+                    continue
+                visited.add(to_node_id)
+
+                edge_attrs = first_edge if first_edge else {
+                    "priority":  out_edge.getPriority(),
+                    "road_type": ROAD_TYPE_LABEL.get(out_edge.getPriority(), "other"),
+                    "num_lanes": out_edge.getLaneNumber(),
+                    "length":    round(out_edge.getLength(), 1),
+                    "speed_kmh": round(out_edge.getSpeed() * 3.6, 1),
+                    "edge_id":   out_edge.getID(),
+                }
+
+                to_tls_id = to_node.getTLSID()
+                if to_tls_id and to_tls_id in node_index and to_tls_id != start_tls_id:
+                    pair = (start_tls_id, to_tls_id)
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        connections.append({
+                            "from_tls": start_tls_id,
+                            "to_tls":   to_tls_id,
+                            "hops":     hops + 1,
+                            **edge_attrs,
+                        })
+                else:
+                    queue.append((to_node, hops + 1, edge_attrs))
+
+    return connections
+
 
 def _build_het_graph(net, tls_info: dict):
     G = nx.DiGraph()
 
-    tls_list = list(net.getTrafficLights())
-    tls_ids  = sorted(tls.getID() for tls in tls_list)
-    tls_map  = {tls.getID(): tls for tls in tls_list}
+    tls_list   = list(net.getTrafficLights())
+    tls_ids    = sorted(tls.getID() for tls in tls_list)
+    node_index = set(tls_ids)
 
     # ── Intersection nodes ────────────────────────────────────────────────
     for tls_id in tls_ids:
-        node  = net.getNode(tls_id) if net.hasNode(tls_id) else None
-        x, y  = node.getCoord() if node else (0.0, 0.0)
-        info  = tls_info.get(tls_id, {})
-        num_phases = info.get("num_phases", "?")
-        action_dim = info.get("action_dim", "?")
-
+        x, y = _get_tls_coord(net, tls_id)
+        info = tls_info.get(tls_id, {})
         G.add_node(tls_id, node_type="intersection",
-                   num_phases=num_phases, action_dim=action_dim,
+                   num_phases=info.get("num_phases", "?"),
+                   action_dim=info.get("action_dim", "?"),
                    x=x, y=y)
 
-    # ── Connection nodes ──────────────────────────────────────────────────
-    seen = set()
-    for tls in tls_list:
-        from_id = tls.getID()
-        for edge in tls.getEdges():
-            for out_edge, _ in edge.getOutgoing().items():
-                nbr = out_edge.getTLS()
-                if nbr is None:
-                    continue
-                to_id = nbr.getID()
-                if from_id == to_id:
-                    continue
-                key = (from_id, to_id, out_edge.getID())
-                if key in seen:
-                    continue
-                seen.add(key)
+    # ── Connection nodes — multi-hop BFS ──────────────────────────────────
+    connections = _find_multihop_connections(net, tls_ids, max_hops=3)
 
-                priority  = out_edge.getPriority()
-                num_lanes = out_edge.getLaneNumber()
-                length    = out_edge.getLength()
-                speed     = out_edge.getSpeed()
+    for conn in connections:
+        from_tls_id = conn["from_tls"]
+        to_tls_id   = conn["to_tls"]
 
-                shape = out_edge.getShape()
-                if shape:
-                    cx = np.mean([p[0] for p in shape])
-                    cy = np.mean([p[1] for p in shape])
-                else:
-                    nf = net.getNode(from_id) if net.hasNode(from_id) else None
-                    nt = net.getNode(to_id)   if net.hasNode(to_id)   else None
-                    if nf and nt:
-                        fx, fy = nf.getCoord()
-                        tx, ty = nt.getCoord()
-                        cx, cy = (fx+tx)/2, (fy+ty)/2
-                    else:
-                        cx, cy = 0., 0.
+        fx, fy = _get_tls_coord(net, from_tls_id)
+        tx, ty = _get_tls_coord(net, to_tls_id)
+        cx, cy = (fx + tx) / 2, (fy + ty) / 2
 
-                conn_id = f"conn::{out_edge.getID()}"
-                G.add_node(conn_id, node_type="connection",
-                           from_tls=from_id, to_tls=to_id,
-                           edge_id=out_edge.getID(),
-                           priority=priority,
-                           road_type=ROAD_TYPE_LABEL.get(priority, "other"),
-                           num_lanes=num_lanes,
-                           length=round(length, 1),
-                           speed_kmh=round(speed * 3.6, 1),
-                           is_signalised=out_edge.getTLS() is not None,
-                           x=cx, y=cy)
-                G.add_edge(from_id, conn_id, edge_type="to_conn")
-                G.add_edge(conn_id, to_id,   edge_type="from_conn")
+        conn_id = f"conn::{conn['edge_id']}"
+        G.add_node(conn_id, node_type="connection",
+                   from_tls=from_tls_id, to_tls=to_tls_id,
+                   edge_id=conn["edge_id"],
+                   priority=conn["priority"],
+                   road_type=conn["road_type"],
+                   num_lanes=conn["num_lanes"],
+                   length=conn["length"],
+                   speed_kmh=conn["speed_kmh"],
+                   is_signalised=False,
+                   hops=conn["hops"],
+                   x=cx, y=cy)
+        G.add_edge(from_tls_id, conn_id, edge_type="to_conn")
+        G.add_edge(conn_id,     to_tls_id, edge_type="from_conn")
 
     return G, tls_ids
-
 
 def plot_networkx(G, tls_ids, ax):
     pos = nx.kamada_kawai_layout(G, scale=3.5)
