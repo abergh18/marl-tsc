@@ -94,7 +94,6 @@ def _get_tls_coord(net, tls_id):
                 return net.getNode(candidate).getCoord()
     return (0.0, 0.0)
 
-
 def _find_multihop_connections(net, tls_ids, max_hops=3):
     node_index = set(tls_ids)
     connections = []
@@ -132,14 +131,20 @@ def _find_multihop_connections(net, tls_ids, max_hops=3):
                     continue
                 visited.add(to_node_id)
 
-                edge_attrs = first_edge if first_edge else {
-                    "priority":  out_edge.getPriority(),
-                    "road_type": ROAD_TYPE_LABEL.get(out_edge.getPriority(), "other"),
-                    "num_lanes": out_edge.getLaneNumber(),
-                    "length":    round(out_edge.getLength(), 1),
-                    "speed_kmh": round(out_edge.getSpeed() * 3.6, 1),
-                    "edge_id":   out_edge.getID(),
-                }
+                if first_edge is None:
+                    shape = out_edge.getShape()
+                    edge_attrs = {
+                        "priority":    out_edge.getPriority(),
+                        "road_type":   ROAD_TYPE_LABEL.get(out_edge.getPriority(), "other"),
+                        "num_lanes":   out_edge.getLaneNumber(),
+                        "length":      round(out_edge.getLength(), 1),
+                        "speed_mph":   round(out_edge.getSpeed() * 2.23694, 1),
+                        "edge_id":     out_edge.getID(),
+                        "shape_mid_x": float(np.mean([p[0] for p in shape])) if shape else None,
+                        "shape_mid_y": float(np.mean([p[1] for p in shape])) if shape else None,
+                    }
+                else:
+                    edge_attrs = first_edge
 
                 to_tls_id = to_node.getTLSID()
                 if to_tls_id and to_tls_id in node_index and to_tls_id != start_tls_id:
@@ -158,12 +163,11 @@ def _find_multihop_connections(net, tls_ids, max_hops=3):
     return connections
 
 
-def _build_het_graph(net, tls_info: dict):
-    G = nx.DiGraph()
+def _build_het_graph(net, tls_info: dict, max_hops=3):
+    G = nx.Graph()
 
     tls_list   = list(net.getTrafficLights())
     tls_ids    = sorted(tls.getID() for tls in tls_list)
-    node_index = set(tls_ids)
 
     # ── Intersection nodes ────────────────────────────────────────────────
     for tls_id in tls_ids:
@@ -175,15 +179,19 @@ def _build_het_graph(net, tls_info: dict):
                    x=x, y=y)
 
     # ── Connection nodes — multi-hop BFS ──────────────────────────────────
-    connections = _find_multihop_connections(net, tls_ids, max_hops=3)
+    connections = _find_multihop_connections(net, tls_ids, max_hops=max_hops)
 
     for conn in connections:
         from_tls_id = conn["from_tls"]
         to_tls_id   = conn["to_tls"]
 
-        fx, fy = _get_tls_coord(net, from_tls_id)
-        tx, ty = _get_tls_coord(net, to_tls_id)
-        cx, cy = (fx + tx) / 2, (fy + ty) / 2
+        # Use actual edge shape midpoint if available, else TLS midpoint
+        if conn.get("shape_mid_x") is not None:
+            cx, cy = conn["shape_mid_x"], conn["shape_mid_y"]
+        else:
+            fx, fy = _get_tls_coord(net, from_tls_id)
+            tx, ty = _get_tls_coord(net, to_tls_id)
+            cx, cy = (fx + tx) / 2, (fy + ty) / 2
 
         conn_id = f"conn::{conn['edge_id']}"
         G.add_node(conn_id, node_type="connection",
@@ -193,7 +201,7 @@ def _build_het_graph(net, tls_info: dict):
                    road_type=conn["road_type"],
                    num_lanes=conn["num_lanes"],
                    length=conn["length"],
-                   speed_kmh=conn["speed_kmh"],
+                   speed_mph=conn["speed_mph"],
                    is_signalised=False,
                    hops=conn["hops"],
                    x=cx, y=cy)
@@ -202,7 +210,9 @@ def _build_het_graph(net, tls_info: dict):
 
     return G, tls_ids
 
+
 def plot_networkx(G, tls_ids, ax):
+    # Revert to Kamada-Kawai — better spacing for sparse graphs
     pos = nx.kamada_kawai_layout(G, scale=3.5)
 
     i_nodes = [n for n, d in G.nodes(data=True) if d["node_type"] == "intersection"]
@@ -228,12 +238,12 @@ def plot_networkx(G, tls_ids, ax):
         node_size=2400, alpha=0.95,
         linewidths=2.0, edgecolors="white")
 
-    # Intersection short IDs inside nodes
+    # Intersection labels
     nx.draw_networkx_labels(G, pos,
         labels={n: _short(n, 11) for n in i_nodes}, ax=ax,
         font_size=7, font_color="white", font_weight="bold")
 
-    # ── Intersection annotation boxes ─────────────────────────────────────
+    # Intersection annotation boxes
     for n in i_nodes:
         d = G.nodes[n]
         x, y = pos[n]
@@ -246,7 +256,7 @@ def plot_networkx(G, tls_ids, ax):
                               alpha=0.95, linewidth=1.2),
                     zorder=10)
 
-    # ── Connection node annotation boxes ─────────────────────────────────
+    # Connection node annotation boxes
     for n in c_nodes:
         d = G.nodes[n]
         x, y = pos[n]
@@ -254,7 +264,7 @@ def plot_networkx(G, tls_ids, ax):
         txt = (f"{d['road_type']}\n"
                f"{d['num_lanes']} lane{'s' if d['num_lanes']!=1 else ''}"
                f"  {d['length']}m\n"
-               f"{d['speed_kmh']} km/h")
+               f"{d['speed_mph']} mph")
         ax.annotate(txt, xy=(x, y), xytext=(0, -44),
                     textcoords="offset points",
                     ha="center", va="top", fontsize=7,
@@ -276,7 +286,6 @@ def plot_networkx(G, tls_ids, ax):
         mpatches.Patch(color=C["unclassified"], label="Connection: unclassified"),
         mpatches.Patch(color=C["residential"],  label="Connection: residential"),
     ], loc="lower left", fontsize=8, framealpha=0.9, edgecolor="#90A4AE")
-
 
 def plot_geographic(G, net, tls_ids, ax):
     # Road edges background
@@ -347,7 +356,7 @@ def print_node_summary(G, tls_ids):
     for _, d in sorted(conn_nodes, key=lambda x: x[1]["priority"], reverse=True):
         print(f"  {_short(d['from_tls'],22)} -> {_short(d['to_tls'],22)}")
         print(f"    type={d['road_type']}  lanes={d['num_lanes']}  "
-              f"length={d['length']}m  speed={d['speed_kmh']}km/h")
+              f"length={d['length']}m  speed={d['speed_mph']}mph")
 
     road_types = {}
     for _, d in conn_nodes:
@@ -360,7 +369,7 @@ def print_node_summary(G, tls_ids):
     print("=" * 70 + "\n")
 
 
-def visualise_het_network(network_file: str, output_dir: str = "."):
+def visualise_het_network(network_file: str, output_dir: str = ".", max_hops=3):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -371,7 +380,7 @@ def visualise_het_network(network_file: str, output_dir: str = "."):
     tls_info = _parse_tls_from_xml(str(network_file))
 
     print("Building heterogeneous graph...")
-    G, tls_ids = _build_het_graph(net, tls_info)
+    G, tls_ids = _build_het_graph(net, tls_info, max_hops=max_hops)
 
     print_node_summary(G, tls_ids)
 
@@ -398,4 +407,5 @@ if __name__ == "__main__":
             "/content/drive/MyDrive/Uni-Masters/Group Project/outputs/lancasterv2.net.xml"),
         output_dir=os.environ.get("OUTPUT_DIR",
             "/content/drive/MyDrive/Uni-Masters/Group Project/outputs"),
+    max_hops=3
     )
