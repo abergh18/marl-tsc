@@ -1,48 +1,41 @@
 """
-hetero_graph_builder.py
+hetero_graph_builder.py  — v2
 
-A drop-in companion to GraphBuilder that enriches the intersection graph
-with connection nodes representing the road segments between intersections.
+Drop-in companion to GraphBuilder that enriches the intersection graph
+with connection nodes representing road segments between intersections.
+
+Changes from v1
+---------------
+- Connection node traversal uses multi-hop BFS (up to max_hops) instead
+  of single-hop getOutgoing(). This captures tertiary, unclassified, and
+  residential connections between TLS junctions, not just direct primary
+  road links.
+- Connection node feature vector updated to combined B+C scheme (7 features)
+  capturing both bottleneck constraints and aggregate path characteristics.
+- max_hops exposed as constructor parameter.
 
 Node layout in the output Data object
 --------------------------------------
 Indices 0 .. N-1          : intersection (agent) nodes
 Indices N .. N+C-1        : connection nodes
 
-Both node types are projected to a shared embedding dimension so the
-existing homogeneous GAT encoder can be used unchanged.
-
-Edge layout
------------
-intersection_i --> connection_k --> intersection_j
-
-replaces the direct
-
-intersection_i --> intersection_j
-
-of the original GraphBuilder.  Both directions are included so the graph
-remains undirected from the GAT's perspective.
+Both node types are projected to shared_dim so the existing homogeneous
+GAT encoder can be used unchanged.
 
 Connection node features (static, built once from .net.xml)
 ------------------------------------------------------------
-0  priority          normalised road priority  (residential=3 .. primary=12)
-1  num_lanes         number of lanes on the connecting edge
-2  length            road segment length  (metres, normalised)
-3  speed_limit       speed limit  (m/s, normalised)
-4  dir_straight      binary: connection direction is straight
-5  dir_left          binary: left turn
-6  dir_right         binary: right turn
-7  dir_turn          binary: U-turn
-8  is_signalised     binary: connection is controlled by a TLS
-
-Intersection node features
---------------------------
-Passed in at runtime from SUMO observations (same as existing GraphBuilder).
-A learned linear projection maps them to CONNECTION_DIM before concatenation
-so both node types share the same feature dimension fed to the GAT.
+0  first_priority    road priority of first edge leaving source TLS  (normalised)
+1  min_lanes         bottleneck lane count along path                (normalised)
+2  total_length      sum of all hop lengths                          (normalised)
+3  min_speed         bottleneck speed limit                          (normalised)
+4  mean_speed        average speed limit across hops                 (normalised)
+5  num_hops          number of road segments in path                 (normalised by max_hops)
+6  any_signalised    binary: any intermediate junction is TLS-controlled
 """
 
-from dataclasses import dataclass, field
+from __future__ import annotations
+
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -53,29 +46,17 @@ from sumolib.net import readNet
 from torch_geometric.data import Data
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+# ── Constants ─────────────────────────────────────────────────────────────────
 
-CONNECTION_FEAT_DIM = 9          # dimension of raw connection node features
-_MAX_PRIORITY      = 12.0        # highway.primary priority in SUMO
-_MAX_LENGTH        = 500.0       # normalisation cap for road length (m)
-_MAX_SPEED         = 33.33       # normalisation cap ~120 km/h (m/s)
-_MAX_LANES         = 4.0         # normalisation cap for lane count
+CONNECTION_FEAT_DIM = 7
 
-_DIR_MAP = {
-    "s": (1, 0, 0, 0),   # straight
-    "l": (0, 1, 0, 0),   # left
-    "L": (0, 1, 0, 0),   # partial left — treated as left
-    "r": (0, 0, 1, 0),   # right
-    "R": (0, 0, 1, 0),   # partial right — treated as right
-    "t": (0, 0, 0, 1),   # U-turn
-}
+_MAX_PRIORITY  = 12.0
+_MAX_LENGTH    = 1500.0   # increased for multi-hop paths
+_MAX_SPEED     = 33.33
+_MAX_LANES     = 4.0
 
 
-# ---------------------------------------------------------------------------
-# Dataclasses
-# ---------------------------------------------------------------------------
+# ── Dataclass ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class HeteroGraphTopology:
@@ -85,16 +66,14 @@ class HeteroGraphTopology:
     Parameters
     ----------
     agent_ids
-        Ordered list of TLS intersection IDs.  Matches node indices 0..N-1.
+        Ordered list of TLS intersection IDs.  Node indices 0..N-1.
     node_index
         Maps agent_id -> index in [0, N).
     connection_features
-        Float tensor of shape [C, CONNECTION_FEAT_DIM] for the C connection
-        nodes (indices N..N+C-1 in the combined graph).
+        Float tensor [C, CONNECTION_FEAT_DIM] for connection nodes N..N+C-1.
     connection_meta
-        List of (from_tls_id, to_tls_id, edge_id) for each connection node,
-        in the same order as connection_features rows.  Useful for the
-        proximity matrix and for logging.
+        List of (from_tls_id, to_tls_id, edge_id, num_hops) for each
+        connection node, in the same order as connection_features rows.
     edge_index
         Combined edge_index [2, E] covering both directions of
         intersection -> connection -> intersection paths.
@@ -103,9 +82,10 @@ class HeteroGraphTopology:
     num_connections
         C — number of connection nodes.
     agent_mask
-        Boolean tensor of shape [N+C] — True for intersection nodes,
-        False for connection nodes.  Used by the policy to select only
-        agent embeddings for action/value heads.
+        Boolean tensor [N+C] — True for intersection nodes.
+    proximity_matrix
+        Float tensor [N, N] — normalised proximity weights between agents,
+        computed from path lengths. Useful for topology-aware reward sharing.
     """
     agent_ids:           list
     node_index:          dict
@@ -115,28 +95,28 @@ class HeteroGraphTopology:
     num_intersections:   int
     num_connections:     int
     agent_mask:          torch.Tensor
+    proximity_matrix:    torch.Tensor
 
 
-# ---------------------------------------------------------------------------
-# Builder
-# ---------------------------------------------------------------------------
+# ── Builder ───────────────────────────────────────────────────────────────────
 
 class HeteroGraphBuilder:
     """
-    Builds an enriched graph that inserts connection nodes between
-    intersections while remaining compatible with the existing homogeneous
-    GAT encoder via a learned projection layer.
+    Builds an enriched graph inserting connection nodes between intersections,
+    compatible with the existing homogeneous GAT encoder via learned projection.
 
     Parameters
     ----------
-    network_file
+    network_file : str
         Path to the SUMO .net.xml file.
-    intersection_obs_dim
-        Dimension of the per-agent SUMO observation vector (runtime).
-        Required so the projection layer can be sized correctly.
-    shared_dim
-        Dimension of the shared embedding space fed to the GAT.
-        Both intersection and connection nodes are projected to this size.
+    intersection_obs_dim : int
+        Dimension of the per-agent SUMO observation vector.
+    shared_dim : int
+        Shared embedding dimension. Both node types are projected here.
+    max_hops : int
+        Maximum BFS depth when searching for TLS-to-TLS connections.
+        max_hops=1 finds only direct single-edge connections.
+        max_hops=3 (default) finds connections via up to 3 road segments.
     """
 
     def __init__(
@@ -144,28 +124,24 @@ class HeteroGraphBuilder:
         network_file: str,
         intersection_obs_dim: int,
         shared_dim: int = 64,
+        max_hops: int = 3,
     ):
-        self.network_file        = Path(network_file)
+        self.network_file         = Path(network_file)
         self.intersection_obs_dim = intersection_obs_dim
-        self.shared_dim          = shared_dim
+        self.shared_dim           = shared_dim
+        self.max_hops             = max_hops
 
         self.net = readNet(str(self.network_file))
 
-        # Projection layers — these are plain nn.Linear modules.
-        # They should be included in the policy's parameter group so they
-        # are trained end-to-end with the GAT encoder.
+        # Projection layers — included in HeteroGraphMAPPOPolicy.parameters()
         self.intersection_proj = nn.Linear(intersection_obs_dim, shared_dim)
         self.connection_proj   = nn.Linear(CONNECTION_FEAT_DIM, shared_dim)
 
-        # Build static topology once
         self.topology = self._build_topology()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Public API ────────────────────────────────────────────────────────
 
     def build(self) -> HeteroGraphTopology:
-        """Return the pre-built static topology."""
         return self.topology
 
     def to_graph(
@@ -174,145 +150,104 @@ class HeteroGraphBuilder:
         topology: Optional[HeteroGraphTopology] = None,
     ) -> Data:
         """
-        Build a PyG Data object compatible with the existing GAT encoder.
-
-        Parameters
-        ----------
-        observations
-            Dict mapping agent_id -> np.ndarray of SUMO observation features.
-        topology
-            Pre-built HeteroGraphTopology.  Defaults to self.topology.
+        Build a PyG Data object from current SUMO observations.
 
         Returns
         -------
-        torch_geometric.data.Data
-            .x           : [N+C, shared_dim]  projected node features
-            .edge_index  : [2, E]             combined edge index
-            .agent_mask  : [N+C]              True for intersection nodes
+        Data with:
+            .x            raw intersection obs  (N, intersection_obs_dim)
+            .connection_x static connection feats (C, CONNECTION_FEAT_DIM)
+            .edge_index   combined het edge index (2, E)
+            .agent_mask   bool [N+C], True = intersection node
         """
         if topology is None:
             topology = self.topology
 
-        # --- Intersection node features (runtime) -------------------------
-        intersection_x = torch.tensor(
+        x = torch.tensor(
             np.stack([
                 observations[agent_id]
                 for agent_id in topology.agent_ids
             ]),
             dtype=torch.float32,
-        )                                                    # [N, obs_dim]
-        intersection_emb = self.intersection_proj(
-            intersection_x
-        )                                                    # [N, shared_dim]
+        )
 
-        # --- Connection node features (static) ----------------------------
-        connection_emb = self.connection_proj(
-            topology.connection_features
-        )                                                    # [C, shared_dim]
-
-        # --- Combine ------------------------------------------------------
-        x = torch.cat([intersection_emb, connection_emb], dim=0)  # [N+C, shared_dim]
-
-        return Data(
+        graph = Data(
             x=x,
             edge_index=topology.edge_index,
-            agent_mask=topology.agent_mask,
         )
+        graph.connection_x = topology.connection_features
+        graph.agent_mask   = topology.agent_mask
 
-    # ------------------------------------------------------------------
-    # Internal topology construction
-    # ------------------------------------------------------------------
+        return graph
+
+    # ── Internal topology construction ────────────────────────────────────
 
     def _build_topology(self) -> HeteroGraphTopology:
-        # ---- Intersection nodes -----------------------------------------
-        agent_ids = sorted(
-            tls.getID()
-            for tls in self.net.getTrafficLights()
-        )
-        node_index = {
-            agent_id: idx
-            for idx, agent_id in enumerate(agent_ids)
-        }
+        tls_list  = list(self.net.getTrafficLights())
+        agent_ids = sorted(tls.getID() for tls in tls_list)
+        node_index = {aid: idx for idx, aid in enumerate(agent_ids)}
         N = len(agent_ids)
 
-        # ---- Connection nodes -------------------------------------------
-        # One connection node per (from_tls, to_tls, edge) triple.
-        # Multiple edges between the same pair of intersections each get
-        # their own connection node — this preserves lane-level detail.
+        # ── Find connections via BFS ───────────────────────────────────────
+        raw_connections = self._find_connections(agent_ids)
+        C = len(raw_connections)
+
+        # ── Build connection feature matrix ───────────────────────────────
         connection_features_list = []
-        connection_meta          = []   # (from_tls_id, to_tls_id, edge_id)
-        conn_node_idx            = {}   # (from_tls_id, to_tls_id, edge_id) -> int
-
+        connection_meta          = []
         edges_src = []   # intersection index
-        edges_dst = []   # connection node index (offset by N after loop)
+        edges_dst = []   # connection node index (offset by N)
 
-        for tls in self.net.getTrafficLights():
-            from_id = tls.getID()
-            for edge in tls.getEdges():
-                for outgoing_edge, _ in edge.getOutgoing().items():
-                    neighbour_tls = outgoing_edge.getTLS()
-                    if neighbour_tls is None:
-                        continue
-                    to_id = neighbour_tls.getID()
-                    if from_id == to_id:
-                        continue
+        for c_idx, conn in enumerate(raw_connections):
+            feat = self._connection_features(conn)
+            connection_features_list.append(feat)
+            connection_meta.append((
+                conn["from_tls"],
+                conn["to_tls"],
+                conn["edge_id"],
+                conn["num_hops"],
+            ))
+            edges_src.append(node_index[conn["from_tls"]])
+            edges_dst.append(c_idx + N)
 
-                    key = (from_id, to_id, outgoing_edge.getID())
-                    if key in conn_node_idx:
-                        continue
+        # ── Build connection -> destination intersection edges ─────────────
+        conn_to_int_src = []
+        conn_to_int_dst = []
+        for c_idx, conn in enumerate(raw_connections):
+            conn_to_int_src.append(c_idx + N)
+            conn_to_int_dst.append(node_index[conn["to_tls"]])
 
-                    c_idx = len(connection_meta)
-                    conn_node_idx[key] = c_idx
-                    connection_meta.append(key)
-
-                    feat = self._connection_features(outgoing_edge)
-                    connection_features_list.append(feat)
-
-                    # intersection -> connection (directed)
-                    edges_src.append(node_index[from_id])
-                    edges_dst.append(c_idx)   # offset applied below
-
-        C = len(connection_meta)
-
-        # Offset connection node indices by N
-        edges_dst_offset = [idx + N for idx in edges_dst]
-
-        # Build connection -> destination intersection edges
-        # For each connection node, find the to_tls and add reverse edge
-        conn_to_intersection_src = []
-        conn_to_intersection_dst = []
-        for c_idx, (from_id, to_id, _) in enumerate(connection_meta):
-            conn_to_intersection_src.append(c_idx + N)
-            conn_to_intersection_dst.append(node_index[to_id])
-
-        # Combine all edges (both directions for undirected behaviour)
+        # Both directions for undirected-equivalent message passing
         all_src = (
-            edges_src                   +   # intersection -> connection
-            edges_dst_offset            +   # connection -> intersection (reverse of above)
-            conn_to_intersection_src    +   # connection -> intersection
-            conn_to_intersection_dst        # intersection -> connection (reverse of above)
+            edges_src           +   # intersection -> connection
+            [d for d in edges_dst] +   # connection -> intersection (reverse)
+            conn_to_int_src     +   # connection -> intersection
+            conn_to_int_dst         # intersection -> connection (reverse)
         )
         all_dst = (
-            edges_dst_offset            +
-            edges_src                   +
-            conn_to_intersection_dst    +
-            conn_to_intersection_src
+            edges_dst           +
+            edges_src           +
+            conn_to_int_dst     +
+            conn_to_int_src
         )
 
         edge_index = torch.tensor(
-            [all_src, all_dst],
-            dtype=torch.long,
+            [all_src, all_dst], dtype=torch.long
         ).contiguous()
 
-        # ---- Node features -----------------------------------------------
         connection_features = torch.tensor(
             np.stack(connection_features_list),
             dtype=torch.float32,
         ) if connection_features_list else torch.zeros(0, CONNECTION_FEAT_DIM)
 
-        # ---- Agent mask --------------------------------------------------
+        # ── Agent mask ────────────────────────────────────────────────────
         agent_mask = torch.zeros(N + C, dtype=torch.bool)
         agent_mask[:N] = True
+
+        # ── Proximity matrix ──────────────────────────────────────────────
+        proximity_matrix = self._build_proximity_matrix(
+            agent_ids, node_index, raw_connections, N
+        )
 
         return HeteroGraphTopology(
             agent_ids=agent_ids,
@@ -323,38 +258,149 @@ class HeteroGraphBuilder:
             num_intersections=N,
             num_connections=C,
             agent_mask=agent_mask,
+            proximity_matrix=proximity_matrix,
         )
 
-    def _connection_features(self, edge) -> np.ndarray:
-        priority    = edge.getPriority() / _MAX_PRIORITY
-        num_lanes   = edge.getLaneNumber() / _MAX_LANES
-        length      = min(edge.getLength(), _MAX_LENGTH) / _MAX_LENGTH
-        speed_limit = min(edge.getSpeed(), _MAX_SPEED) / _MAX_SPEED
+    def _find_connections(self, agent_ids: list) -> list:
+        """
+        BFS from each TLS junction to find all reachable TLS junctions
+        within max_hops road segments.
 
-        # Direction — gather from all outgoing connections across all lanes
-        directions = []
-        for lane in edge.getLanes():
-            for conn in lane.getOutgoing():
-                directions.append(conn.getDirection())
+        Returns list of connection dicts with aggregated path features.
+        """
+        node_index = set(agent_ids)
+        connections = []
+        seen_pairs  = set()
 
-        dir_counts = {}
-        for d in directions:
-            dir_counts[d] = dir_counts.get(d, 0) + 1
-        dominant_dir = max(dir_counts, key=dir_counts.get) if dir_counts else "s"
-        dir_straight, dir_left, dir_right, dir_turn = _DIR_MAP.get(
-            dominant_dir, (1, 0, 0, 0)
-        )
+        for start_tls_id in agent_ids:
+            start_node = self._get_tls_node(start_tls_id)
+            if start_node is None:
+                continue
 
-        is_signalised = float(edge.getTLS() is not None)
+            # BFS: (current_node, hops, path_data)
+            queue   = [(start_node, 0, None)]
+            visited = {start_node.getID()}
 
+            while queue:
+                current_node, hops, path_data = queue.pop(0)
+                if hops >= self.max_hops:
+                    continue
+
+                for out_edge in current_node.getOutgoing():
+                    to_node    = out_edge.getToNode()
+                    to_node_id = to_node.getID()
+
+                    if to_node_id in visited:
+                        continue
+                    visited.add(to_node_id)
+
+                    # Accumulate path data
+                    if path_data is None:
+                        new_path = {
+                            "edge_id":        out_edge.getID(),
+                            "first_priority": out_edge.getPriority(),
+                            "min_lanes":      out_edge.getLaneNumber(),
+                            "total_length":   out_edge.getLength(),
+                            "min_speed":      out_edge.getSpeed(),
+                            "speed_sum":      out_edge.getSpeed(),
+                            "num_hops":       1,
+                            "any_signalised": out_edge.getTLS() is not None,
+                        }
+                    else:
+                        new_path = {
+                            "edge_id":        path_data["edge_id"],
+                            "first_priority": path_data["first_priority"],
+                            "min_lanes":      min(path_data["min_lanes"],
+                                                  out_edge.getLaneNumber()),
+                            "total_length":   path_data["total_length"] +
+                                              out_edge.getLength(),
+                            "min_speed":      min(path_data["min_speed"],
+                                                  out_edge.getSpeed()),
+                            "speed_sum":      path_data["speed_sum"] +
+                                              out_edge.getSpeed(),
+                            "num_hops":       path_data["num_hops"] + 1,
+                            "any_signalised": path_data["any_signalised"] or
+                                              out_edge.getTLS() is not None,
+                        }
+
+                    to_tls_id = to_node.getTLSID()
+                    if (to_tls_id and to_tls_id in node_index
+                            and to_tls_id != start_tls_id):
+                        pair = (start_tls_id, to_tls_id)
+                        if pair not in seen_pairs:
+                            seen_pairs.add(pair)
+                            connections.append({
+                                "from_tls":       start_tls_id,
+                                "to_tls":         to_tls_id,
+                                "mean_speed":     new_path["speed_sum"] /
+                                                  new_path["num_hops"],
+                                **{k: v for k, v in new_path.items()
+                                   if k != "speed_sum"},
+                            })
+                    else:
+                        queue.append((to_node, hops + 1, new_path))
+
+        return connections
+
+    def _connection_features(self, conn: dict) -> np.ndarray:
+        """
+        Build normalised 7-feature vector for a connection node.
+
+        Features
+        --------
+        0  first_priority   priority of first edge / _MAX_PRIORITY
+        1  min_lanes        bottleneck lane count / _MAX_LANES
+        2  total_length     total path length / _MAX_LENGTH
+        3  min_speed        bottleneck speed / _MAX_SPEED
+        4  mean_speed       average speed / _MAX_SPEED
+        5  num_hops         hops / max_hops
+        6  any_signalised   binary
+        """
         return np.array([
-            priority,
-            num_lanes,
-            length,
-            speed_limit,
-            float(dir_straight),
-            float(dir_left),
-            float(dir_right),
-            float(dir_turn),
-            is_signalised,
+            conn["first_priority"] / _MAX_PRIORITY,
+            conn["min_lanes"]      / _MAX_LANES,
+            min(conn["total_length"], _MAX_LENGTH) / _MAX_LENGTH,
+            conn["min_speed"]      / _MAX_SPEED,
+            conn["mean_speed"]     / _MAX_SPEED,
+            conn["num_hops"]       / self.max_hops,
+            float(conn["any_signalised"]),
         ], dtype=np.float32)
+
+    def _build_proximity_matrix(
+        self,
+        agent_ids: list,
+        node_index: dict,
+        connections: list,
+        N: int,
+    ) -> torch.Tensor:
+        """
+        Build an N x N proximity matrix using exponential decay on
+        total path length.  proximity[i][j] = exp(-total_length / scale).
+
+        Diagonal is 0 (no self-gifting).
+        Unconnected pairs get proximity 0.
+        """
+        scale = 200.0   # decay scale in metres — tunable
+        matrix = torch.zeros(N, N)
+
+        for conn in connections:
+            i = node_index[conn["from_tls"]]
+            j = node_index[conn["to_tls"]]
+            w = np.exp(-conn["total_length"] / scale)
+            matrix[i][j] = w
+            matrix[j][i] = w   # symmetric
+
+        return matrix
+
+    def _get_tls_node(self, tls_id: str):
+        """
+        Get the sumolib Node for a TLS ID, handling joinedS composite IDs.
+        """
+        if self.net.hasNode(tls_id):
+            return self.net.getNode(tls_id)
+        parts = tls_id.replace("joinedS_", "").split("_cluster_")
+        for part in parts:
+            for candidate in [part] + part.split("_"):
+                if self.net.hasNode(candidate):
+                    return self.net.getNode(candidate)
+        return None
