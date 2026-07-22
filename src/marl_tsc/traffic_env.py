@@ -25,9 +25,13 @@ class SumoTrafficEnv(ParallelEnv):
         seconds_per_action: int = 5,
         max_lanes_per_tls: int | None = None,
         green_phase_count: int | None = None,
-        max_queue_value: float = 100.0,
+        max_queue_value: float = 20.0,
         min_green_seconds: int = 10,
+        max_green_seconds: int = 60,
+        max_red_seconds: int = 60,
+        yellow_seconds: int = 3,
         switch_penalty: float = 0.1,
+        phase_action_mode: str = "direct",
         seed: int = 42,
         render_mode: str | None = None,
         possible_agents: Sequence[str] | None = None,
@@ -40,6 +44,16 @@ class SumoTrafficEnv(ParallelEnv):
             raise ValueError("green_phase_count must be at least 1.")
         if global_metric_interval < 1:
             raise ValueError("global_metric_interval must be at least 1.")
+        if min_green_seconds < 0:
+            raise ValueError("min_green_seconds cannot be negative.")
+        if max_green_seconds < max(min_green_seconds, 1):
+            raise ValueError("max_green_seconds must be at least min_green_seconds.")
+        if max_red_seconds < max(min_green_seconds, 1):
+            raise ValueError("max_red_seconds must be at least min_green_seconds.")
+        if yellow_seconds < 0 or yellow_seconds >= seconds_per_action:
+            raise ValueError("yellow_seconds must be non-negative and less than seconds_per_action.")
+        if phase_action_mode not in {"cycle", "direct"}:
+            raise ValueError("phase_action_mode must be 'cycle' or 'direct'.")
 
         self.config_file = Path(config_file)
         self.max_steps = max_steps
@@ -48,7 +62,11 @@ class SumoTrafficEnv(ParallelEnv):
         self.green_phase_count = green_phase_count
         self.max_queue_value = max_queue_value
         self.min_green_seconds = min_green_seconds
+        self.max_green_seconds = max_green_seconds
+        self.max_red_seconds = max_red_seconds
+        self.yellow_seconds = yellow_seconds
         self.switch_penalty = switch_penalty
+        self.phase_action_mode = phase_action_mode
         self.seed = seed
         self.render_mode = render_mode
         self.collect_global_metrics = collect_global_metrics
@@ -62,11 +80,16 @@ class SumoTrafficEnv(ParallelEnv):
         self.agents: list[str] = self.possible_agents.copy()
         self._tls_to_lanes: dict[str, list[str]] = {}
         self._tls_to_green_phases: dict[str, list[int]] = {}
+        self._tls_to_green_states: dict[str, list[str]] = {}
+        self._tls_to_program_ids: dict[str, str] = {}
         self._tls_to_phase_lanes: dict[str, list[list[str]]] = {}
         self._current_actions: dict[str, int] = {}
         self._elapsed_green_seconds: dict[str, float] = {}
+        self._phase_red_seconds: dict[str, list[float]] = {}
         self._switched_last_step: dict[str, bool] = {}
         self._latest_lane_queues: dict[str, list[int]] = {}
+        self._latest_max_waiting_times: dict[str, float] = {}
+        self._previous_mean_local_queue: dict[str, float] = {}
         self._last_arrived_vehicles = 0
         self._last_mean_waiting_time = 0.0
         self._last_total_time_loss = 0.0
@@ -152,6 +175,33 @@ class SumoTrafficEnv(ParallelEnv):
                 green_phases.append(phase_index)
         return green_phases
 
+    def _set_green_phase(self, traffic_light_id: str, phase_index: int) -> None:
+        """Select and hold a green phase until the environment changes it.
+
+        SUMO otherwise advances to the next programmed phase when the phase's
+        original fixed-time duration expires.  That would make the physical
+        signal disagree with ``_current_actions`` and with the observation and
+        action mask exposed to the policy.
+        """
+        traci = self._import_traci()
+        program_id = self._tls_to_program_ids.get(traffic_light_id)
+        if program_id is not None:
+            traci.trafficlight.setProgram(traffic_light_id, program_id)
+        traci.trafficlight.setPhase(traffic_light_id, phase_index)
+        traci.trafficlight.setPhaseDuration(traffic_light_id, 1_000_000.0)
+
+    @staticmethod
+    def _yellow_transition_state(current_state: str, target_state: str) -> str:
+        """Build a safe yellow state for movements losing right of way."""
+        return "".join(
+            current
+            if current in "gG" and target in "gG"
+            else "y"
+            if current in "gG"
+            else "r"
+            for current, target in zip(current_state, target_state)
+        )
+
     def _probe_network_structure(self) -> None:
         """Briefly start SUMO to size spaces to the network's real configuration."""
         traci = self._import_traci()
@@ -191,11 +241,16 @@ class SumoTrafficEnv(ParallelEnv):
 
         self._tls_to_lanes = {}
         self._tls_to_green_phases = {}
+        self._tls_to_green_states = {}
+        self._tls_to_program_ids = {}
         self._tls_to_phase_lanes = {}
         self._current_actions = {}
         self._elapsed_green_seconds = {}
+        self._phase_red_seconds = {}
         self._switched_last_step = {}
         self._latest_lane_queues = {}
+        self._latest_max_waiting_times = {}
+        self._previous_mean_local_queue = {}
         self._last_arrived_vehicles = 0
         self._last_mean_waiting_time = 0.0
         self._last_total_time_loss = 0.0
@@ -220,6 +275,10 @@ class SumoTrafficEnv(ParallelEnv):
                 )
 
             self._tls_to_green_phases[tls_id] = green_phases
+            self._tls_to_program_ids[tls_id] = program.programID
+            self._tls_to_green_states[tls_id] = [
+                program.phases[phase_index].state for phase_index in green_phases
+            ]
             self._tls_to_phase_lanes[tls_id] = [
                 list(
                     dict.fromkeys(
@@ -235,14 +294,17 @@ class SumoTrafficEnv(ParallelEnv):
             ]
             self._current_actions[tls_id] = 0
             self._elapsed_green_seconds[tls_id] = 0.0
+            self._phase_red_seconds[tls_id] = [0.0] * len(green_phases)
             self._switched_last_step[tls_id] = False
             self._latest_lane_queues[tls_id] = []
-            traci.trafficlight.setPhase(tls_id, green_phases[0])
+            self._latest_max_waiting_times[tls_id] = 0.0
+            self._previous_mean_local_queue[tls_id] = 0.0
+            self._set_green_phase(tls_id, green_phases[0])
 
     def observation_space(self, agent: str) -> Box:
         """Returns the observation space for a specific agent."""
         phase_feature_count = self.green_phase_count if self.include_phase_queue_features else 0
-        mask_feature_count = self.green_phase_count if self.include_action_mask_features else 0
+        mask_feature_count = self._action_count() if self.include_action_mask_features else 0
         return Box(
             low=0.0,
             high=1.0,
@@ -253,9 +315,13 @@ class SumoTrafficEnv(ParallelEnv):
     def action_space(self, agent: str) -> Discrete:
         """Returns the action space for a specific agent.
 
-        Actions select one of the traffic light's green phases.
+        In cycle mode, action 0 holds the current phase and action 1 advances
+        to the next green phase. Direct mode selects a green phase by index.
         """
-        return Discrete(self.green_phase_count)
+        return Discrete(self._action_count())
+
+    def _action_count(self) -> int:
+        return 2 if self.phase_action_mode == "cycle" else self.green_phase_count
 
     def _current_phase_normalized(self, agent: str) -> float:
         current_action = self._current_actions.get(agent, 0)
@@ -274,25 +340,34 @@ class SumoTrafficEnv(ParallelEnv):
         graded resolution well past the switch boundary.
         """
         elapsed = self._elapsed_green_seconds.get(agent, 0.0)
-        scale = max(self.min_green_seconds, 1) * 4.0
+        scale = max(self.max_green_seconds, 1)
         return float(min(elapsed / scale, 1.0))
 
     def action_mask(self, agent: str) -> np.ndarray:
         """Returns a binary mask indicating legal actions for the agent.
 
-        The current phase is always legal. Other valid phase choices are legal
-        once the minimum green time requirement has been met. If different
-        junctions have different numbers of phases, higher invalid phase ids
-        remain masked out for that junction.
+        Switching is disabled before the minimum green time. Holding is disabled
+        at the maximum green time so even a deterministic policy cannot starve
+        all other movements indefinitely.
         """
-        mask = np.zeros(self.green_phase_count, dtype=np.float32)
+        mask = np.zeros(self._action_count(), dtype=np.float32)
 
         current_action = self._current_actions.get(agent, 0)
-        mask[current_action] = 1.0
+        elapsed = self._elapsed_green_seconds.get(agent, 0.0)
+        valid_phase_count = len(self._tls_to_green_phases.get(agent, []))
 
-        if self._elapsed_green_seconds.get(agent, 0.0) >= self.min_green_seconds:
-            valid_phase_count = len(self._tls_to_green_phases.get(agent, []))
-            mask[:valid_phase_count] = 1.0
+        if self.phase_action_mode == "cycle":
+            mask[0] = 1.0
+            if elapsed >= self.min_green_seconds and valid_phase_count > 1:
+                mask[1] = 1.0
+            if elapsed >= self.max_green_seconds and valid_phase_count > 1:
+                mask[0] = 0.0
+        else:
+            mask[current_action] = 1.0
+            if elapsed >= self.min_green_seconds:
+                mask[:valid_phase_count] = 1.0
+            if elapsed >= self.max_green_seconds and valid_phase_count > 1:
+                mask[current_action] = 0.0
 
         return mask
 
@@ -371,14 +446,19 @@ class SumoTrafficEnv(ParallelEnv):
     def _reward_for_agent(self, agent: str) -> float:
         """Computes the reward for an agent based on local traffic metrics.
 
-        The default implementation penalizes high queue lengths and phase
-        switches to encourage stability and flow.
+        The dominant term is the current mean queue, which directly matches the
+        main evaluation objective.  A small queue-reduction bonus improves
+        credit assignment without allowing a single vehicle's cumulative wait
+        to make rewards grow more negative merely because an episode is older.
         """
-        _, mean_local_queue, max_local_queue = self._local_queue_stats(agent)
+        _, mean_local_queue, _ = self._local_queue_stats(agent)
+        previous_queue = self._previous_mean_local_queue.get(agent, mean_local_queue)
+        queue_improvement = previous_queue - mean_local_queue
         switched = self._switched_last_step.get(agent, False)
-        penalty = self.switch_penalty if switched else 0.0
-        queue_penalty = 0.8 * mean_local_queue + 0.2 * max_local_queue
-        return (-queue_penalty - penalty) * 0.1
+        switch_cost = self.switch_penalty if switched else 0.0
+        bounded_improvement = float(np.clip(queue_improvement, -5.0, 5.0))
+        bounded_queue = min(mean_local_queue, self.max_queue_value)
+        return 0.25 * bounded_improvement - bounded_queue - switch_cost
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
@@ -387,6 +467,10 @@ class SumoTrafficEnv(ParallelEnv):
         self._discover_agents_and_lanes()
 
         observations = self._get_obs()
+        for agent in self.agents:
+            _, mean_local_queue, _ = self._local_queue_stats(agent)
+            self._previous_mean_local_queue[agent] = mean_local_queue
+
         infos = {agent: {"action_mask": self.action_mask(agent)} for agent in self.agents}
         return observations, infos
 
@@ -397,16 +481,21 @@ class SumoTrafficEnv(ParallelEnv):
         satisfied. Early change requests are ignored.
         """
         traci = self._import_traci()
+        pending_switches: dict[str, list[int]] = {}
+
+        for agent in self.agents:
+            self._switched_last_step[agent] = False
 
         for agent in self.agents:
             if agent not in actions:
                 continue
 
             requested_action = int(actions[agent])
-            if requested_action < 0 or requested_action >= self.green_phase_count:
+            action_count = self._action_count()
+            if requested_action < 0 or requested_action >= action_count:
                 raise ValueError(
                     f"Action {requested_action} is out of range for agent {agent!r}; "
-                    f"expected an action from 0 to {self.green_phase_count - 1}."
+                    f"expected an action from 0 to {action_count - 1}."
                 )
 
             current_action = self._current_actions.get(agent, 0)
@@ -414,8 +503,19 @@ class SumoTrafficEnv(ParallelEnv):
             min_green_satisfied = elapsed_green >= self.min_green_seconds
             switched = False
 
-            target_action = requested_action
             valid_phase_count = len(self._tls_to_green_phases.get(agent, []))
+            max_green_reached = elapsed_green >= self.max_green_seconds
+            if self.phase_action_mode == "cycle":
+                advance = requested_action == 1 or max_green_reached
+                target_action = (
+                    (current_action + 1) % valid_phase_count
+                    if advance and valid_phase_count > 1
+                    else current_action
+                )
+            else:
+                target_action = requested_action
+                if max_green_reached and target_action == current_action and valid_phase_count > 1:
+                    target_action = (current_action + 1) % valid_phase_count
             should_switch = (
                 target_action < valid_phase_count
                 and target_action != current_action
@@ -424,23 +524,45 @@ class SumoTrafficEnv(ParallelEnv):
 
             if should_switch:
                 phase_index = self._tls_to_green_phases[agent][target_action]
-                traci.trafficlight.setPhase(agent, phase_index)
-                self._current_actions[agent] = target_action
-                self._elapsed_green_seconds[agent] = 0.0
+                if self.yellow_seconds:
+                    current_state = traci.trafficlight.getRedYellowGreenState(agent)
+                    target_state = self._tls_to_green_states[agent][target_action]
+                    yellow_state = self._yellow_transition_state(current_state, target_state)
+                    traci.trafficlight.setRedYellowGreenState(agent, yellow_state)
+                    pending_switches[agent] = [
+                        self.yellow_seconds,
+                        phase_index,
+                        target_action,
+                    ]
+                else:
+                    self._set_green_phase(agent, phase_index)
+                    self._current_actions[agent] = target_action
+                    self._elapsed_green_seconds[agent] = 0.0
                 switched = True
 
             # Track whether the junction actually changed state this step.
             self._switched_last_step[agent] = switched
-
-        for agent in self.agents:
-            elapsed_green = self._elapsed_green_seconds.get(agent, 0.0)
-            self._elapsed_green_seconds[agent] = elapsed_green + self.seconds_per_action
 
         # Perform the actual physics steps in SUMO.
         arrived_vehicles = 0
         for _ in range(self.seconds_per_action):
             traci.simulationStep()
             arrived_vehicles += int(traci.simulation.getArrivedNumber())
+            for agent in self.agents:
+                pending = pending_switches.get(agent)
+                if pending is None:
+                    self._elapsed_green_seconds[agent] = (
+                        self._elapsed_green_seconds.get(agent, 0.0) + 1.0
+                    )
+                    continue
+
+                pending[0] -= 1
+                if pending[0] <= 0:
+                    _, phase_index, target_action = pending
+                    self._set_green_phase(agent, phase_index)
+                    self._current_actions[agent] = target_action
+                    self._elapsed_green_seconds[agent] = 0.0
+                    del pending_switches[agent]
 
         self.step_count += 1
         self._last_arrived_vehicles = arrived_vehicles
@@ -472,6 +594,15 @@ class SumoTrafficEnv(ParallelEnv):
             self._latest_lane_queues[agent] = [
                 traci.lane.getLastStepHaltingNumber(lane_id) for lane_id in lane_ids
             ]
+            waiting_times = []
+            for lane_id in lane_ids:
+                waiting_times.extend(
+                    traci.vehicle.getWaitingTime(vehicle_id)
+                    for vehicle_id in traci.lane.getLastStepVehicleIDs(lane_id)
+                )
+            self._latest_max_waiting_times[agent] = (
+                float(max(waiting_times)) if waiting_times else 0.0
+            )
 
         observations = self._get_obs()
         rewards = {agent: self._reward_for_agent(agent) for agent in self.agents}
@@ -492,6 +623,7 @@ class SumoTrafficEnv(ParallelEnv):
                 "local_queue": local_queue,
                 "mean_local_queue": mean_local_queue,
                 "max_local_queue": max_local_queue,
+                "max_waiting_time": self._latest_max_waiting_times.get(agent, 0.0),
                 "switched": self._switched_last_step.get(agent, False),
                 "current_action": current_action,
                 "min_green_satisfied": self._min_green_satisfied(agent),
@@ -502,6 +634,7 @@ class SumoTrafficEnv(ParallelEnv):
                 "total_time_loss": self._last_total_time_loss,
                 "global_metrics_updated": global_metrics_updated,
             }
+            self._previous_mean_local_queue[agent] = mean_local_queue
 
         if truncated:
             self.agents = []
