@@ -227,6 +227,28 @@ def train_hetero_mappo(
         if reward_sharing is not None:
             trainer.runner = GiftingGraphRunner(env=env, policy=policy)
 
+        # ── Sanity check gifting wiring ───────────────────────────────────────
+        if reward_sharing is not None:
+            from marl_tsc.graph_based.models.hetero_gifting_mappo_policy import HeteroGiftingMAPPOPolicy
+            assert isinstance(policy, HeteroGiftingMAPPOPolicy), \
+                f"Expected HeteroGiftingMAPPOPolicy, got {type(policy)}"
+            assert hasattr(policy, 'branches'), \
+                "Policy missing branches — gifting head not attached"
+            
+            # Run one forward pass to verify output has gifting_logits
+            _test_obs, _ = env.reset()
+            _test_obs_device = trainer.runner._move_graph_obs_to_device(_test_obs)
+            _test_output = policy(_test_obs_device)
+            assert hasattr(_test_output, 'gifting_logits'), \
+                f"Policy output missing gifting_logits — got {type(_test_output)}"
+            assert _test_output.gifting_logits is not None, \
+                "gifting_logits is None"
+            print(f"✓ Gifting wiring verified — gifting_logits shape: {_test_output.gifting_logits.shape}")
+            
+            # Reset env back to clean state after test
+            env.reset()
+
+
         # ── Train ─────────────────────────────────────────────────────────
         model, history, model_path = run_training(
             trainer=trainer,

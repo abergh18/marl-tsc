@@ -180,7 +180,9 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
                     old_gifting_log_probs = rollout_batch.gifting_log_probs[t]
 
                     gifting_logits = self.policy.branches[1](
-                        output.encoder_output.node_embeddings
+                        output.encoder_output
+                        if isinstance(output.encoder_output, torch.Tensor)
+                        else output.encoder_output.node_embeddings
                     )
                     dist_g = Categorical(logits=gifting_logits)
                     new_gifting_log_probs = dist_g.log_prob(gifting_actions_t)
@@ -262,6 +264,8 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
             "actor_loss": float(torch.stack(actor_losses).mean()),
             "critic_loss": float(torch.stack(value_losses).mean()),
             "entropy_loss": float(torch.stack(entropy_losses).mean()),
+            "total_loss": float(torch.stack(actor_losses).mean() + 
+                          self.value_coef * torch.stack(value_losses).mean()),
             "policy_clip_fraction": float(torch.stack(policy_clip_fracs).mean()),
             "mean_training_reward": float(rollout_batch.rewards.mean()),
             "rollout_length": len(rollout_batch.observations),
