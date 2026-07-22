@@ -22,15 +22,15 @@ import torch
 import torch.optim
 
 from marl_tsc.graph_based.heterogene.hetero_graph_env import HeteroGraphEnv
-from marl_tsc.graph_based.heterogene.hetero_graph_mappo_policy import HeteroGraphMAPPOPolicy
-from marl_tsc.graph_based.heterogene.hetero_gifting_mappo_policy import HeteroGiftingMAPPOPolicy
+from marl_tsc.graph_based.models.hetero_graph_mappo_policy import HeteroGraphMAPPOPolicy
+from marl_tsc.graph_based.models.hetero_gifting_mappo_policy import HeteroGiftingMAPPOPolicy
 from marl_tsc.graph_based.heterogene.hetero_graph_builder import CONNECTION_FEAT_DIM
 from marl_tsc.graph_based.true_mappo_trainer import TrueMAPPOTrainer
 from marl_tsc.graph_based.run_training import run_training
 from marl_tsc.graph_based.models.true_mappo_policy import CentralisedCritic
 from marl_tsc.graph_based.encoders.gat_encoder import GATEncoder
 from marl_tsc.graph_based.gifting_graph_runner import GiftingGraphRunner
-from marl_tsc.sumo_env import SumoTrafficEnv
+from marl_tsc.traffic_env import SumoTrafficEnv
 from marl_tsc.wrappers import ZeroSumRewardWrapper, PeerRewardingWrapper
 
 
