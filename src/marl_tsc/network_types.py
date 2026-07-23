@@ -78,6 +78,7 @@ class CityNetwork(NetworkType):
     lane_number: int | None = None
     left_hand: bool = True
     connected_components: int = 1
+    discard_simple: bool = False
 
     def generate(
         self,
@@ -104,7 +105,6 @@ class CityNetwork(NetworkType):
             "--ramps.guess",
             "--junctions.join",
             "--tls.guess-signals",
-            "--tls.discard-simple",
             "--tls.join",
             "--output.original-names",
             "--output.street-names",
@@ -116,6 +116,8 @@ class CityNetwork(NetworkType):
             command.extend(["--default.lanenumber", str(self.lane_number)])
         if self.left_hand:
             command.append("--lefthand")
+        if not self.discard_simple:
+            command.append("--tls.discard-simple")
 
         run_command(command)
 
