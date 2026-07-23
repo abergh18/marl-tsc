@@ -281,7 +281,7 @@ def plot_networkx(G, tls_ids, ax):
 
     ax.legend(handles=[
         mpatches.Patch(color=C["intersection"], label="Intersection (agent)"),
-        mpatches.Patch(color=C["primary"],      label="Connection: primary (A6)"),
+        mpatches.Patch(color=C["primary"],      label="Connection: primary"),
         mpatches.Patch(color=C["tertiary"],     label="Connection: tertiary"),
         mpatches.Patch(color=C["unclassified"], label="Connection: unclassified"),
         mpatches.Patch(color=C["residential"],  label="Connection: residential"),
@@ -331,7 +331,7 @@ def plot_geographic(G, net, tls_ids, ax):
 
     ax.legend(handles=[
         mpatches.Patch(color=C["intersection"], label="Intersection (agent)"),
-        mpatches.Patch(color=C["primary"],      label="Primary (A6)"),
+        mpatches.Patch(color=C["primary"],      label="Primary"),
         mpatches.Patch(color=C["tertiary"],     label="Tertiary"),
         mpatches.Patch(color=C["unclassified"], label="Unclassified"),
         mpatches.Patch(color=C["residential"],  label="Residential"),
@@ -369,7 +369,12 @@ def print_node_summary(G, tls_ids):
     print("=" * 70 + "\n")
 
 
-def visualise_het_network(network_file: str, output_dir: str = ".", max_hops=3):
+def visualise_het_network(
+      network_file: str, 
+      output_dir: str = ".", 
+      max_hops=3,
+      city_name: str = None
+  ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -390,7 +395,7 @@ def visualise_het_network(network_file: str, output_dir: str = ".", max_hops=3):
     plot_networkx(G, tls_ids, axes[0])
     plot_geographic(G, net, tls_ids, axes[1])
 
-    fig.suptitle("Lancaster Network — Heterogeneous Graph Visualisation",
+    fig.suptitle(f"{city_name} — Heterogeneous Graph Visualisation",
                  fontsize=15, fontweight="bold", y=1.01)
 
     plt.tight_layout()
@@ -407,5 +412,6 @@ if __name__ == "__main__":
             "/content/drive/MyDrive/Uni-Masters/Group Project/outputs/lancasterv2.net.xml"),
         output_dir=os.environ.get("OUTPUT_DIR",
             "/content/drive/MyDrive/Uni-Masters/Group Project/outputs"),
-    max_hops=3
+    max_hops=3,
+    city_name= 'Lancaster, UK',
     )
