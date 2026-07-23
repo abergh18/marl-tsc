@@ -12,20 +12,23 @@ from marl_tsc.traffic_env import SumoTrafficEnv
 from .graph_builder import GraphBuilder
 from .graph_types import GraphObservation
 
-
 class GraphTrafficEnv:
     """
     Graph-based wrapper around SumoTrafficEnv.
 
-    Returns PyTorch Geometric Data objects instead of
-    observation dictionaries.
-
-    Changes from original
-    ---------------------
-    - _to_graph() now computes global_state = x.flatten() and attaches it
-      to GraphObservation. This is used by the centralised critic in true
-      MAPPO. All other algorithms receive it as None by default and ignore it.
-    - global_state_dim property added for policy construction.
+    Parameters
+    ----------
+    config_file : str
+    network_file : str
+    possible_agents : list[str]
+    graph_builder : optional
+        Any object with a .build() method returning GraphTopology.
+        Defaults to GraphBuilder(network_file) for backwards compatibility.
+        Pass a MultiHopGraphBuilder instance for richer connectivity.
+    sumo_env : optional
+        Pre-constructed SumoTrafficEnv.
+    **env_kwargs
+        Passed to SumoTrafficEnv if sumo_env is None.
     """
 
     def __init__(
@@ -33,7 +36,8 @@ class GraphTrafficEnv:
         config_file,
         network_file,
         possible_agents,
-        sumo_env=None,      # <-- ADD: accept pre-wrapped env
+        graph_builder=None,
+        sumo_env=None,
         **env_kwargs,
     ):
         if sumo_env is not None:
@@ -45,25 +49,20 @@ class GraphTrafficEnv:
                 **env_kwargs,
             )
 
-        self.topology = GraphBuilder(
-            network_file
-        ).build()
-
+        # Use provided builder or default to original GraphBuilder
+        builder = graph_builder or GraphBuilder(network_file)
+        self.topology = builder.build()
         self.agent_ids = self.topology.agent_ids
 
     def _to_graph(self, observations):
-
         x = torch.tensor(
-            np.stack(
-                [
-                    observations[agent]
-                    for agent in self.agent_ids
-                ]
-            ),
+            np.stack([
+                observations[agent]
+                for agent in self.agent_ids
+            ]),
             dtype=torch.float32,
-        )                                       # (num_agents, obs_dim)
-
-        global_state = x.flatten()             # (num_agents * obs_dim,)
+        )
+        global_state = x.flatten()
 
         return GraphObservation(
             graph=Data(
@@ -75,35 +74,14 @@ class GraphTrafficEnv:
         )
 
     def reset(self, *args, **kwargs):
-
-        observations, infos = self.env.reset(
-            *args,
-            **kwargs,
-        )
-
-        graph = self._to_graph(observations)
-
-        return graph, infos
+        observations, infos = self.env.reset(*args, **kwargs)
+        return self._to_graph(observations), infos
 
     def step(self, actions):
-
-        (
-            observations,
-            rewards,
-            terminations,
-            truncations,
-            infos,
-        ) = self.env.step(actions)
-
-        graph = self._to_graph(observations)
-
-        return (
-            graph,
-            rewards,
-            terminations,
-            truncations,
-            infos,
+        observations, rewards, terminations, truncations, infos = (
+            self.env.step(actions)
         )
+        return self._to_graph(observations), rewards, terminations, truncations, infos
 
     def close(self):
         self.env.close()
@@ -126,5 +104,4 @@ class GraphTrafficEnv:
 
     @property
     def global_state_dim(self):
-        """Dimension of the centralised global state vector."""
         return len(self.agent_ids) * self.obs_dim

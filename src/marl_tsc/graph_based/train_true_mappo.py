@@ -45,7 +45,6 @@ from marl_tsc.graph_based.models.policy_factory import (
     build_default_graph_mappo_policy,
 )
 
-
 def train_true_mappo(
     config_file,
     network_file,
@@ -66,44 +65,17 @@ def train_true_mappo(
     critic_hidden_dim=128,
     reward_sharing=None,
     gifting_divisions=None,
+    graph_builder=None,       # NEW — optional MultiHopGraphBuilder
 ):
     """
     Train a true graph-based MAPPO policy with optional reward sharing.
 
     Parameters
     ----------
-    config_file : str or Path
-    network_file : str or Path
-    traffic_light_ids : list[str]
-    output_dir : str or Path
-    total_timesteps : int
-    rollout_steps : int
-    max_steps : int
-    seed : int
-    env_kwargs : dict, optional
-    clip_ratio : float
-    entropy_coef : float
-        Entropy coefficient for the traffic actor head.
-    gifting_entropy_coef : float
-        Entropy coefficient for the gifting head. Only used when
-        reward_sharing is not None.
-    value_coef : float
-    learning_rate : float
-    update_epochs : int
-    hidden_dim : int
-    critic_hidden_dim : int
-    reward_sharing : str or None
-        Reward sharing mechanism to use. Options:
-            None           — standard true MAPPO, no gifting
-            "zero_sum"     — zero-sum peer reward sharing
-            "public_goods" — public goods peer reward sharing
-    gifting_divisions : int or None
-        Number of discrete gifting portions. Defaults to
-        num_agents - 1 when reward_sharing is not None.
-
-    Returns
-    -------
-    model, history, model_path
+    graph_builder : optional
+        Any object with a .build() method returning GraphTopology.
+        Defaults to None — GraphTrafficEnv uses GraphBuilder internally.
+        Pass a MultiHopGraphBuilder for richer connectivity on OSM networks.
     """
 
     torch.manual_seed(seed)
@@ -115,11 +87,6 @@ def train_true_mappo(
     env = None
 
     try:
-        # ── Build environment ─────────────────────────────────────────────────
-        # For reward sharing, SumoTrafficEnv is constructed first, wrapped,
-        # then passed to GraphTrafficEnv — preventing two SUMO instances.
-        # For standard MAPPO, GraphTrafficEnv constructs SumoTrafficEnv itself.
-
         if reward_sharing is not None:
             from marl_tsc.traffic_env import SumoTrafficEnv
             from marl_tsc.graph_based.gifting_graph_runner import GiftingGraphRunner
@@ -132,18 +99,18 @@ def train_true_mappo(
                 possible_agents=traffic_light_ids,
             )
 
-            num_agents = len(traffic_light_ids)
+            num_agents    = len(traffic_light_ids)
             num_divisions = gifting_divisions or max(1, num_agents - 1)
 
             if reward_sharing == "zero_sum":
                 from marl_tsc.wrappers import ZeroSumRewardWrapper
-                wrapped_sumo = ZeroSumRewardWrapper(sumo_env, division=num_divisions)
+                wrapped_sumo   = ZeroSumRewardWrapper(sumo_env, division=num_divisions)
                 algorithm_name = "true_mappo_zero_sum"
                 model_filename = "true_mappo_zero_sum.pt"
 
             elif reward_sharing == "public_goods":
                 from marl_tsc.wrappers import PeerRewardingWrapper
-                wrapped_sumo = PeerRewardingWrapper(sumo_env, division=num_divisions)
+                wrapped_sumo   = PeerRewardingWrapper(sumo_env, division=num_divisions)
                 algorithm_name = "true_mappo_public_goods"
                 model_filename = "true_mappo_public_goods.pt"
 
@@ -158,18 +125,16 @@ def train_true_mappo(
                 network_file=network_file,
                 possible_agents=traffic_light_ids,
                 sumo_env=wrapped_sumo,
+                graph_builder=graph_builder,    # NEW
             )
 
-            graph_obs, infos = env.reset()
-            obs_dim = graph_obs.graph.x.shape[1]
-            agent_ids = env.agent_ids
-            action_dim = int(env.action_spaces[agent_ids[0]].nvec[0])
-            global_state_dim = env.global_state_dim
+            graph_obs, infos  = env.reset()
+            obs_dim           = graph_obs.graph.x.shape[1]
+            agent_ids         = env.agent_ids
+            action_dim        = int(env.action_spaces[agent_ids[0]].nvec[0])
+            global_state_dim  = env.global_state_dim
 
-            encoder = GATEncoder(
-                obs_dim=obs_dim,
-                hidden_dim=hidden_dim,
-            )
+            encoder = GATEncoder(obs_dim=obs_dim, hidden_dim=hidden_dim)
             centralised_critic = CentralisedCritic(
                 global_state_dim=global_state_dim,
                 hidden_dim=critic_hidden_dim,
@@ -185,18 +150,18 @@ def train_true_mappo(
             runner_class = GiftingGraphRunner
 
         else:
-            # ── Standard true MAPPO — no gifting ─────────────────────────────
             env = GraphTrafficEnv(
                 config_file=config_file,
                 network_file=network_file,
                 possible_agents=traffic_light_ids,
+                graph_builder=graph_builder,    # NEW
             )
 
-            graph_obs, infos = env.reset()
-            obs_dim = graph_obs.graph.x.shape[1]
-            agent_ids = env.agent_ids
-            action_dim = int(env.action_spaces[agent_ids[0]].n)
-            global_state_dim = env.global_state_dim
+            graph_obs, infos  = env.reset()
+            obs_dim           = graph_obs.graph.x.shape[1]
+            agent_ids         = env.agent_ids
+            action_dim        = int(env.action_spaces[agent_ids[0]].n)
+            global_state_dim  = env.global_state_dim
 
             policy = build_default_graph_mappo_policy(
                 obs_dim=obs_dim,
@@ -206,17 +171,12 @@ def train_true_mappo(
                 critic_hidden_dim=critic_hidden_dim,
             ).to(device)
 
-            runner_class = None
+            runner_class   = None
             algorithm_name = "true_mappo"
             model_filename = "true_mappo.pt"
 
-        # ── Optimizer ─────────────────────────────────────────────────────────
-        optimizer = torch.optim.Adam(
-            policy.parameters(),
-            lr=learning_rate,
-        )
+        optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
 
-        # ── Trainer ───────────────────────────────────────────────────────────
         trainer = TrueMAPPOTrainer(
             env=env,
             policy=policy,
@@ -232,11 +192,9 @@ def train_true_mappo(
             update_epochs=update_epochs,
         )
 
-        # Swap in gifting runner if needed
         if runner_class is not None:
             trainer.runner = runner_class(env=env, policy=policy)
 
-        # ── Train ─────────────────────────────────────────────────────────────
         model, history, model_path = run_training(
             trainer=trainer,
             total_timesteps=total_timesteps,
