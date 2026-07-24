@@ -425,6 +425,7 @@ def train_mappo(
             gamma,
             gae_lambda,
         )
+        advantages = np.clip(advantages, -10.0, 10.0)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         value_norm.update(returns)
