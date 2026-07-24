@@ -11,9 +11,6 @@ import subprocess
 import sys
 
 
-DEFAULT_TRAFFIC_LIGHT_IDS = ("B1", "B2", "C1", "C2")# TODO: Extract dynamically from the net file instead of hardcoding these IDs. This is just to match the MAPPO notebook for now, but ideally the generator should be more flexible and not require manual updates to the traffic light IDs.
-
-
 @dataclass
 class SimulationPaths:
     """Paths created by SimulationGenerator."""
@@ -244,24 +241,30 @@ class SimulationGenerator:
         orig_period = self.trip_period
         orig_trips = self.trips_filename
     
-        # Generate peak trips WITH vehicle types
+        # Generate peak trips
         self.trips_filename = "peak.trips.xml"
         self.trip_begin = 0
         self.trip_end = peak_end
         self.trip_period = peak_period
-        
+        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
+        argv.extend(["--prefix", "peak_"])
+        self._run_random_trips(argv)
+            
         argv = self._random_trips_argv(
             trip_fringe_factor=self.trip_fringe_factor,
             allow_fringe=self.allow_fringe,
         )
         self._run_random_trips(argv)
     
-        # Generate off-peak trips WITHOUT vehicle types
+        # Generate off-peak trips
         self.trips_filename = "offpeak.trips.xml"
         self.trip_begin = peak_end
         self.trip_end = orig_end
         self.trip_period = offpeak_period
-        
+        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
+        argv.extend(["--prefix", "offpeak_"])
+        self._run_random_trips(argv)
+            
         old_vtypes = self.vtypes_file
         self.vtypes_file = None
         
