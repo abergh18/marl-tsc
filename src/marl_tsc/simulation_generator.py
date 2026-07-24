@@ -174,10 +174,13 @@ class SimulationGenerator:
     def generate_network(self) -> Path:
         """Generate the SUMO network XML file."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
+    
+        if self.traffic_light_ids is None:
+            self.traffic_light_ids = self.discover_traffic_light_ids()
+    
         if not self.traffic_light_ids:
             raise ValueError("traffic_light_ids must contain at least one junction ID.")
-
+    
         command = [
             "netgenerate",
             "--grid",
@@ -190,7 +193,6 @@ class SimulationGenerator:
             "-o",
             str(self.network_file),
         ]
-
         self.run_command(command)
         return self.network_file
 
