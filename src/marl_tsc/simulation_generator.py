@@ -95,8 +95,6 @@ class SimulationGenerator:
             str(self.network_file),
             "-o",
             str(self.trips_file),
-            "-r",
-            str(self.routes_file),
             "--begin",
             str(self.trip_begin),
             "--end",
@@ -250,11 +248,20 @@ class SimulationGenerator:
         argv.extend(["--prefix", "peak_"])
         self._run_random_trips(argv)
             
-        argv = self._random_trips_argv(
-            trip_fringe_factor=self.trip_fringe_factor,
-            allow_fringe=self.allow_fringe,
-        )
+        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
+        argv.extend(["--prefix", "peak_"])
         self._run_random_trips(argv)
+    
+        # verify prefix was applied
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(self.output_dir / "peak.trips.xml")
+        first_trip = tree.getroot().find("trip")
+        if first_trip is not None and not first_trip.get("id", "").startswith("peak_"):
+            # prefix failed, patch the IDs manually
+            for i, trip in enumerate(tree.getroot().findall("trip")):
+                trip.set("id", f"peak_{trip.get('id')}")
+            tree.write(str(self.output_dir / "peak.trips.xml"))
+            print("Patched peak trip IDs manually")
     
         # Generate off-peak trips
         self.trips_filename = "offpeak.trips.xml"
@@ -268,11 +275,20 @@ class SimulationGenerator:
         old_vtypes = self.vtypes_file
         self.vtypes_file = None
         
-        argv = self._random_trips_argv(
-            trip_fringe_factor=self.trip_fringe_factor,
-            allow_fringe=self.allow_fringe,
-        )
+        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
+        argv.extend(["--prefix", "offpeak_"])
         self._run_random_trips(argv)
+    
+        # verify prefix was applied
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(self.output_dir / "offpeak.trips.xml")
+        first_trip = tree.getroot().find("trip")
+        if first_trip is not None and not first_trip.get("id", "").startswith("offpeak_"):
+            # prefix failed, patch the IDs manually
+            for i, trip in enumerate(tree.getroot().findall("trip")):
+                trip.set("id", f"offpeak_{trip.get('id')}")
+            tree.write(str(self.output_dir / "offpeak.trips.xml"))
+            print("Patched offpeak trip IDs manually")
         
         self.vtypes_file = old_vtypes
     
