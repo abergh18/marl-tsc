@@ -229,76 +229,45 @@ class SimulationGenerator:
 
     def generate_peak_trips(self, peak_end: int = 1800, peak_period: float = 1.0, offpeak_period: float = 3.0) -> Path:
         """Generate realistic peak/off-peak demand pattern."""
+        import xml.etree.ElementTree as ET
     
         peak_trips = self.output_dir / "peak.trips.xml"
         offpeak_trips = self.output_dir / "offpeak.trips.xml"
     
-        # Save originals
-        orig_begin = self.trip_begin
-        orig_end = self.trip_end
-        orig_period = self.trip_period
-        orig_trips = self.trips_filename
+        base_args = [
+            sys.executable, str(self.random_trips_file),
+            "-n", str(self.network_file),
+            "--fringe-factor", str(self.trip_fringe_factor or 1),
+            "--allow-fringe",
+            "--edge-permission", "passenger",
+            "--speed-exponent", "2",
+            "--random-depart",
+            "--seed", str(self.seed),
+        ]
+        if self.min_distance is not None:
+            base_args.extend(["--min-distance", str(self.min_distance)])
+        if self.vtypes_file is not None:
+            base_args.extend(["--additional-files", str(self.vtypes_file)])
     
-        # Generate peak trips
-        self.trips_filename = "peak.trips.xml"
-        self.trip_begin = 0
-        self.trip_end = peak_end
-        self.trip_period = peak_period
-        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
-        argv.extend(["--prefix", "peak_"])
-        self._run_random_trips(argv)
-            
-        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
-        argv.extend(["--prefix", "peak_"])
-        self._run_random_trips(argv)
+        # Peak trips
+        subprocess.run(base_args + [
+            "-o", str(peak_trips),
+            "--begin", "0",
+            "--end", str(peak_end),
+            "--period", str(peak_period),
+            "--prefix", "peak_",
+        ], check=True)
     
-        # verify prefix was applied
-        import xml.etree.ElementTree as ET
-        tree = ET.parse(self.output_dir / "peak.trips.xml")
-        first_trip = tree.getroot().find("trip")
-        if first_trip is not None and not first_trip.get("id", "").startswith("peak_"):
-            # prefix failed, patch the IDs manually
-            for i, trip in enumerate(tree.getroot().findall("trip")):
-                trip.set("id", f"peak_{trip.get('id')}")
-            tree.write(str(self.output_dir / "peak.trips.xml"))
-            print("Patched peak trip IDs manually")
+        # Off-peak trips
+        subprocess.run(base_args + [
+            "-o", str(offpeak_trips),
+            "--begin", str(peak_end),
+            "--end", str(self.trip_end),
+            "--period", str(offpeak_period),
+            "--prefix", "offpeak_",
+        ], check=True)
     
-        # Generate off-peak trips
-        self.trips_filename = "offpeak.trips.xml"
-        self.trip_begin = peak_end
-        self.trip_end = orig_end
-        self.trip_period = offpeak_period
-        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
-        argv.extend(["--prefix", "offpeak_"])
-        self._run_random_trips(argv)
-            
-        old_vtypes = self.vtypes_file
-        self.vtypes_file = None
-        
-        argv = self._random_trips_argv(trip_fringe_factor=self.trip_fringe_factor, allow_fringe=self.allow_fringe)
-        argv.extend(["--prefix", "offpeak_"])
-        self._run_random_trips(argv)
-    
-        # verify prefix was applied
-        import xml.etree.ElementTree as ET
-        tree = ET.parse(self.output_dir / "offpeak.trips.xml")
-        first_trip = tree.getroot().find("trip")
-        if first_trip is not None and not first_trip.get("id", "").startswith("offpeak_"):
-            # prefix failed, patch the IDs manually
-            for i, trip in enumerate(tree.getroot().findall("trip")):
-                trip.set("id", f"offpeak_{trip.get('id')}")
-            tree.write(str(self.output_dir / "offpeak.trips.xml"))
-            print("Patched offpeak trip IDs manually")
-        
-        self.vtypes_file = old_vtypes
-    
-        # Restore originals
-        self.trip_begin = orig_begin
-        self.trip_end = orig_end
-        self.trip_period = orig_period
-        self.trips_filename = orig_trips
-    
-        # Merge using duarouter
+        # Merge with duarouter
         subprocess.run([
             "duarouter",
             "-n", str(self.network_file),
@@ -306,6 +275,7 @@ class SimulationGenerator:
             "-o", str(self.routes_file),
             "--ignore-errors",
             "--seed", str(self.seed),
+            "--no-step-log",
         ], check=True)
     
         return self.routes_file
