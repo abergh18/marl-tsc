@@ -129,11 +129,17 @@ def run_training(
         # Training log
         #
         if update % log_interval == 0:
-
             print(
-                f"Iter {update:>3} | "
-                f"Actor {stats.get('actor_loss', 0.0):.4f} | "
-                f"Critic {stats.get('critic_loss', 0.0):.4f}"
+                f"Iter {update:4d} | "
+                f"Actor {stats.get('actor_loss', 0):.4f} | "
+                f"Critic {stats.get('critic_loss', 0):.4f} | "
+                f"Total {stats.get('total_loss', 0):.4f} | "
+                f"Reward {stats.get('mean_training_reward', 0):.4f} | "
+                f"Entropy {stats.get('entropy_loss', 0):.4f}"
+                + (f" | Gift {stats.get('gifting_loss', 0):.4f} | "
+                  f"GiftRate {stats.get('gift_rate', 0):.3f} | "
+                  f"GiftAmt {stats.get('mean_gift_amount', 0):.4f}"
+                  if 'gifting_loss' in stats else "")
             )
 
     #

@@ -136,6 +136,12 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
         gifting_entropy_losses = []
         gifting_clip_fracs = []
 
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        returns_mean = returns.mean()
+        returns_std  = returns.std() + 1e-8
+        returns_norm = (returns - returns_mean) / returns_std
+
         for epoch in range(self.update_epochs):
 
             for t, graph_obs in enumerate(rollout_batch.observations):
@@ -163,7 +169,7 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
                 actor_loss = -torch.min(surr1, surr2).mean()
 
                 # ── Centralised critic loss ───────────────────────────────────
-                target_return = returns[t].mean()
+                target_return = returns_norm[t].mean()
                 value_loss = F.mse_loss(
                     output.global_value.squeeze(),
                     target_return,
