@@ -176,9 +176,19 @@ def _actions_from_policy(
     """Ask a MAPPO model, SB3 model, or baseline function for actions."""
     if hasattr(policy, "act") and callable(policy.act):
         try:
-            return policy.act(observations, infos=infos, deterministic=True)
+            raw = policy.act(observations, infos=infos, deterministic=True)
         except TypeError:
-            return policy.act(observations, deterministic=True)
+            raw = policy.act(observations, deterministic=True)
+        
+        # If actions are [traffic, sharing] lists, extract only traffic action
+        # for environments that don't have PeerRewardingWrapper
+        cleaned = {}
+        for agent, action in raw.items():
+            if isinstance(action, (list, tuple)):
+                cleaned[agent] = int(action[0])  # take only traffic action
+            else:
+                cleaned[agent] = int(action)
+        return cleaned
 
     if hasattr(policy, "predict"):
         actions = {}
@@ -186,11 +196,9 @@ def _actions_from_policy(
             action, _ = policy.predict(observations[agent], deterministic=True)
             actions[agent] = int(action)
         return actions
-
     actions = policy(env, step_index)
     if isinstance(actions, dict):
         return {agent: int(actions.get(agent, 0)) for agent in env.agents}
-
     return {agent: int(actions) for agent in env.agents}
 
 
@@ -240,10 +248,6 @@ def evaluate_policy(
         from marl_tsc.wrappers import MinimumGreenTimeWrapper
         env = MinimumGreenTimeWrapper(env, min_green_steps=10)
 
-        # If the policy has multiple action dimensions, it needs the peer-rewarding wrapper!
-        if hasattr(policy, "action_dims") and len(policy.action_dims) > 1:
-            from marl_tsc.wrappers import PeerRewardingWrapper
-            env = PeerRewardingWrapper(env, division=10)
 
         observations, infos = env.reset(seed=seed + episode_index)
 
