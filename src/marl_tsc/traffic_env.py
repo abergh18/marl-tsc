@@ -27,7 +27,7 @@ class SumoTrafficEnv(ParallelEnv):
         green_phase_count: int | None = None,
         max_queue_value: float = 100.0,
         min_green_seconds: int = 10,
-        switch_penalty: float = 0.1,
+        switch_penalty: float = 0.01,
         seed: int = 42,
         render_mode: str | None = None,
         possible_agents: Sequence[str] | None = None,
