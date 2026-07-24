@@ -35,7 +35,7 @@ class SimulationGenerator:
         config_filename: str = "config.sumocfg",
         grid_number: int = 4,
         lane_number: int = 1,
-        traffic_light_ids: Sequence[str] = DEFAULT_TRAFFIC_LIGHT_IDS,
+        traffic_light_ids: Sequence[str] | None = None,
         trip_begin: int = 0,
         trip_end: int = 1000,
         trip_period: float = 2,
@@ -56,7 +56,7 @@ class SimulationGenerator:
 
         self.grid_number = grid_number
         self.lane_number = lane_number
-        self.traffic_light_ids = tuple(traffic_light_ids)
+        self.traffic_light_ids = tuple(traffic_light_ids) if traffic_light_ids else None
 
         self.trip_begin = trip_begin
         self.trip_end = trip_end
@@ -76,6 +76,16 @@ class SimulationGenerator:
 
         self.random_trips_file = Path(sumo_home) / "tools" / "randomTrips.py"
 
+    def discover_traffic_light_ids(self) -> tuple[str, ...]:
+        """Read traffic light IDs directly from the network file."""
+        import sumolib
+        net = sumolib.net.readNet(str(self.network_file))
+        ids = tuple(tls.getID() for tls in net.getTrafficLights())
+        if not ids:
+            raise ValueError(f"No traffic lights found in {self.network_file}")
+        print(f"Discovered {len(ids)} traffic lights: {list(ids)}")
+        return ids
+    
     def _random_trips_argv(
         self,
         *,
@@ -185,6 +195,8 @@ class SimulationGenerator:
         return self.network_file
 
     def generate_trips(self) -> Path:
+        if self.traffic_light_ids is None:
+            self.traffic_light_ids = self.discover_traffic_light_ids()
         """Generate trips and route files for the generated network."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
