@@ -229,6 +229,11 @@ class SimulationGenerator:
 
     def generate_peak_trips(self, peak_end: int = 1800, peak_period: float = 1.0, offpeak_period: float = 3.0) -> Path:
         """Generate realistic peak/off-peak demand pattern."""
+
+        # Discover traffic light IDs if not already set
+        if self.traffic_light_ids is None:
+            self.traffic_light_ids = self.discover_traffic_light_ids()
+        
         import xml.etree.ElementTree as ET
     
         peak_trips = self.output_dir / "peak.trips.xml"
