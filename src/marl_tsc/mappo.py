@@ -297,7 +297,7 @@ def train_mappo(
     actor = Actor(obs_dim, action_dims, phase_queue_start=phase_queue_start).to(device)
     critic = Critic(obs_dim * num_agents).to(device)
     
-    learning_rate = 5e-5
+    learning_rate = 3e-5
     optimizer = Adam(list(actor.parameters()) + list(critic.parameters()), lr=learning_rate)
 
     gamma = 0.99
