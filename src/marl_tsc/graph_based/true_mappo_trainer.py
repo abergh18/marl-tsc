@@ -265,7 +265,45 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
                 sum(s["mean_gift_amount"] for s in rollout_batch.gifting_stats)
                 / len(rollout_batch.gifting_stats)
             )
+        # ── Add this block to TrueMAPPOTrainer.update() ───────────────────────────────
+        # Place it immediately after the existing gifting_stats aggregation block,
+        # before the stats dict is built.
 
+        # ── Per-agent gifting aggregation ─────────────────────────────────────────────
+        per_agent_gifting_stats = {}
+
+        if is_gifting and rollout_batch.per_agent_gifting:
+            # per_agent_gifting is a list of per-step dicts:
+            # [{agent_id: {gift_fraction, gift_amount, raw_reward, gift_action}}, ...]
+            # Aggregate mean per agent across the rollout.
+
+            # Collect per-agent lists
+            agent_accum = {}
+            for step_dict in rollout_batch.per_agent_gifting:
+                for agent_id, detail in step_dict.items():
+                    if agent_id not in agent_accum:
+                        agent_accum[agent_id] = {
+                            "gift_fractions": [],
+                            "gift_amounts":   [],
+                            "raw_rewards":    [],
+                            "gift_actions":   [],
+                        }
+                    agent_accum[agent_id]["gift_fractions"].append(detail["gift_fraction"])
+                    agent_accum[agent_id]["gift_amounts"].append(detail["gift_amount"])
+                    agent_accum[agent_id]["raw_rewards"].append(detail["raw_reward"])
+                    agent_accum[agent_id]["gift_actions"].append(detail["gift_action"])
+
+            for agent_id, accum in agent_accum.items():
+                per_agent_gifting_stats[agent_id] = {
+                    "mean_gift_fraction": float(sum(accum["gift_fractions"]) / len(accum["gift_fractions"])),
+                    "mean_gift_amount":   float(sum(accum["gift_amounts"])   / len(accum["gift_amounts"])),
+                    "mean_raw_reward":    float(sum(accum["raw_rewards"])    / len(accum["raw_rewards"])),
+                    "gift_rate":          float(sum(1 for a in accum["gift_actions"] if a > 0) / len(accum["gift_actions"])),
+                }
+
+        # ── Then add to stats dict ────────────────────────────────────────────────────
+        # Inside the existing `if is_gifting:` block, add:
+        #     "per_agent_gifting": per_agent_gifting_stats,
         stats = {
             "actor_loss": float(torch.stack(actor_losses).mean()),
             "critic_loss": float(torch.stack(value_losses).mean()),
@@ -286,6 +324,7 @@ class TrueMAPPOTrainer(BaseGraphTrainer):
                 "mean_gift_fraction": mean_gift_fraction,
                 "gift_rate": gift_rate,
                 "mean_gift_amount": mean_gift_amount,
+                "per_agent_gifting": per_agent_gifting_stats,
             })
 
         return stats
