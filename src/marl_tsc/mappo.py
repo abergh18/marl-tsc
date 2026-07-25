@@ -296,7 +296,7 @@ def train_mappo(
     update_epochs = 10
     entropy_coef = 0.05
     value_coef = 0.5
-    local_reward_weight = 0.7
+    local_reward_weight = 0.7 if not use_peer_reward else 0.85
 
     history: list[dict[str, Any]] = []
     global_steps = 0
