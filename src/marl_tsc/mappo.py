@@ -135,11 +135,18 @@ class MappoModel:
                     dtype=torch.float32, 
                     device=self.device
                 )
+                # mask may only cover traffic actions if no PeerRewardingWrapper
                 t_mask = mask_tensor[..., :traffic_dim]
-                logits_list[0] = _mask_logits(logits_list[0].squeeze(0), t_mask)
+                if t_mask.shape[-1] == logits_list[0].squeeze(0).shape[-1]:
+                    logits_list[0] = _mask_logits(logits_list[0].squeeze(0), t_mask)
+                else:
+                    logits_list[0] = logits_list[0].squeeze(0)
                 if len(logits_list) > 1:
                     s_mask = mask_tensor[..., traffic_dim:]
-                    logits_list[1] = _mask_logits(logits_list[1].squeeze(0), s_mask)
+                    if s_mask.shape[-1] == logits_list[1].squeeze(0).shape[-1]:
+                        logits_list[1] = _mask_logits(logits_list[1].squeeze(0), s_mask)
+                    else:
+                        logits_list[1] = logits_list[1].squeeze(0)
             else:
                 logits_list[0] = logits_list[0].squeeze(0)
                 if len(logits_list) > 1:
