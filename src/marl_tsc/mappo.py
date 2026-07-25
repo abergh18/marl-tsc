@@ -192,7 +192,7 @@ def train_mappo(
     )
 
     if use_peer_reward:
-        env = PeerRewardingWrapper(env, division=10)
+        env = PeerRewardingWrapper(env, division=5)
 
     observations, infos = env.reset(seed=seed)
     agent_ids = tuple(traffic_light_ids or env.agents)
