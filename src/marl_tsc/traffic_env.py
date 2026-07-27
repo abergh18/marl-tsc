@@ -67,6 +67,7 @@ class SumoTrafficEnv(ParallelEnv):
         self._elapsed_green_seconds: dict[str, float] = {}
         self._switched_last_step: dict[str, bool] = {}
         self._latest_lane_queues: dict[str, list[int]] = {}
+        self._prev_waiting_time: dict[str, float] = {}
         self._last_arrived_vehicles = 0
         self._last_mean_waiting_time = 0.0
         self._last_total_time_loss = 0.0
@@ -200,6 +201,7 @@ class SumoTrafficEnv(ParallelEnv):
         self._last_mean_waiting_time = 0.0
         self._last_total_time_loss = 0.0
         self._last_vehicle_count = 0
+        self._prev_waiting_time = {agent: 0.0 for agent in selected_agents}
 
         for tls_id in selected_agents:
             controlled_links_lanes = list(traci.trafficlight.getControlledLanes(tls_id))
@@ -369,16 +371,25 @@ class SumoTrafficEnv(ParallelEnv):
         return local_queue, mean_local_queue, max_local_queue
 
     def _reward_for_agent(self, agent: str) -> float:
-        """Computes the reward for an agent based on local traffic metrics.
-
-        The default implementation penalizes high queue lengths and phase
-        switches to encourage stability and flow.
-        """
-        _, mean_local_queue, max_local_queue = self._local_queue_stats(agent)
+        """Delta waiting time reward — positive when waiting time decreases."""
+        traci = self._import_traci()
+        lanes = self._tls_to_lanes.get(agent, [])
+        lane_ids = lanes[:self.max_lanes_per_tls]
+    
+        current_waiting = float(sum(
+            traci.lane.getWaitingTime(lane_id)
+            for lane_id in lane_ids
+        ))
+    
+        prev_waiting = self._prev_waiting_time.get(agent, current_waiting)
+        delta = prev_waiting - current_waiting  # positive = improvement
+    
+        self._prev_waiting_time[agent] = current_waiting
+    
         switched = self._switched_last_step.get(agent, False)
         penalty = self.switch_penalty if switched else 0.0
-        queue_penalty = 0.8 * mean_local_queue + 0.2 * max_local_queue
-        return (-queue_penalty - penalty) * 0.1
+    
+        return (delta / 100.0) - penalty
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
