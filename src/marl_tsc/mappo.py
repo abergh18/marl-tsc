@@ -275,7 +275,7 @@ def train_mappo(
     actor = Actor(obs_dim, action_dims, phase_queue_start=phase_queue_start).to(device)
     critic = Critic(obs_dim * num_agents).to(device)
 
-    learning_rate = 1e-4
+    learning_rate = 3e-4
     optimizer = Adam(
         list(actor.parameters()) + list(critic.parameters()),
         lr=learning_rate,
@@ -294,7 +294,7 @@ def train_mappo(
     gae_lambda = 0.95
     clip_coef = 0.2
     update_epochs = 10
-    entropy_coef = 0.08
+    entropy_coef = 0.02
     value_coef = 0.5
     local_reward_weight = 0.7 if not use_peer_reward else 0.85
 
