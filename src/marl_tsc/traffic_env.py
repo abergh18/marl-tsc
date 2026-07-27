@@ -371,7 +371,6 @@ class SumoTrafficEnv(ParallelEnv):
         return local_queue, mean_local_queue, max_local_queue
 
     def _reward_for_agent(self, agent: str) -> float:
-        """Delta waiting time reward — positive when waiting time decreases."""
         traci = self._import_traci()
         lanes = self._tls_to_lanes.get(agent, [])
         lane_ids = lanes[:self.max_lanes_per_tls]
@@ -382,14 +381,18 @@ class SumoTrafficEnv(ParallelEnv):
         ))
     
         prev_waiting = self._prev_waiting_time.get(agent, current_waiting)
-        delta = prev_waiting - current_waiting  # positive = improvement
+        delta = prev_waiting - current_waiting
     
         self._prev_waiting_time[agent] = current_waiting
     
         switched = self._switched_last_step.get(agent, False)
         penalty = self.switch_penalty if switched else 0.0
     
-        return (delta / 100.0) - penalty
+        # Blend: 70% delta signal + 30% absolute penalty
+        delta_reward = delta / 10.0
+        abs_reward = -current_waiting / 100.0
+        
+        return (0.7 * delta_reward + 0.3 * abs_reward) - penalty
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
