@@ -65,22 +65,23 @@ class MinimumGreenTimeWrapper(BaseParallelWrapper):
 
 class PeerRewardingWrapper(BaseParallelWrapper):
     """
-    A wrapper that adds simultaneous peer rewarding to a PettingZoo environment.
-    Uses a 'Public Goods' mechanic to prevent agents from exploiting negative 
-    rewards, forcing them to balance traffic management with community sharing.
+    Peer rewarding using alternating timesteps, matching the PhD implementation.
+    Even steps: traffic actions only, rewards stored but not returned.
+    Odd steps: sharing actions only, stored rewards redistributed and returned.
     """
-
     def __init__(self, env, division=10):
         super().__init__(env)
         self.division = division
         self.portion_size = 1.0 / division
+        self.t = 0
+        self.last_rewards = {agent: 0.0 for agent in env.possible_agents}
 
-        # Expand the action space to a MultiDiscrete space:
-        # [Traffic Phase, Sharing Percentage]
+        # On traffic steps: Discrete action space (unchanged)
+        # On sharing steps: Discrete(division + 1) for sharing percentage
         self.action_spaces = {
             agent: MultiDiscrete([
                 env.action_space(agent).n,
-                division + 1
+                division + 1,
             ])
             for agent in self.possible_agents
         }
@@ -89,62 +90,65 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         return self.action_spaces[agent]
 
     def reset(self, seed=None, options=None):
+        self.t = 0
+        self.last_rewards = {agent: 0.0 for agent in self.possible_agents}
         obs, infos = self.env.reset(seed=seed, options=options)
         infos = self._update_action_masks(infos)
         return obs, infos
 
     def step(self, actions):
-        env_actions = {}
-        sharing_actions = {}
+        players = list(self.agents)
+        num_agents = max(len(players), 1)
 
-        # 1. Unpack the two separate actions
-        for agent, action in actions.items():
-            env_actions[agent] = action[0]
-            sharing_actions[agent] = action[1]
+        if self.t % 2 == 0:
+            env_actions = {agent: action[0] for agent, action in actions.items()}
+            obs, rewards, terms, truncs, infos = self.env.step(env_actions)
 
-        # 2. Step the underlying environment using ONLY the traffic actions
-        obs, rewards, terms, truncs, infos = self.env.step(env_actions)
+            # Store rewards for the sharing step; return zero rewards now
+            self.last_rewards = {agent: float(rewards.get(agent, 0.0)) for agent in players}
+            zero_rewards = {agent: 0.0 for agent in players}
 
-        final_rewards = {agent: 0.0 for agent in self.agents}
-        sharing_pool = 0.0
-        num_agents = len(self.agents)
+            for agent in players:
+                infos[agent]["raw_traffic_reward"] = self.last_rewards[agent]
 
-        # 3. Calculate Public Goods Game contributions
-        for agent in self.agents:
-            # share_percentage is between 0.0 and 1.0
-            share_percentage = sharing_actions[agent] * self.portion_size
-            
-            # Scaled down to prevent the "infinite money glitch"
-            personal_cost = share_percentage * 0.01
-            community_contribution = personal_cost * 2.0
-            
-            sharing_pool += community_contribution
-            
-            # The agent MUST keep its original traffic penalty, minus the cost of sharing
-            final_rewards[agent] = rewards[agent] - personal_cost
+            self.t += 1
+            infos = self._update_action_masks(infos)
+            return obs, zero_rewards, terms, truncs, infos
 
-        # 4. Distribute the pooled community rewards equally
-        payout_per_agent = sharing_pool / max(1, num_agents)
+        else:
+            sharing_pool = 0.0
+            personal_rewards = {}
 
-        for agent in self.agents:
-            final_rewards[agent] += payout_per_agent
-            
-            # Sneak the original traffic penalty into infos for apples-to-apples evaluation
-            if "raw_traffic_reward" not in infos[agent]:
-                infos[agent]["raw_traffic_reward"] = rewards[agent]
+            for agent in players:
+                share_fraction = actions[agent][1] * self.portion_size
+                give = share_fraction * self.last_rewards[agent]
+                # Each agent gives to the pool and keeps the rest
+                personal_rewards[agent] = self.last_rewards[agent] - give
+                sharing_pool += give
 
-        infos = self._update_action_masks(infos)
-        return obs, final_rewards, terms, truncs, infos
+            # Distribute pool equally among all agents
+            payout_per_agent = sharing_pool / num_agents
+            final_rewards = {
+                agent: personal_rewards[agent] + payout_per_agent
+                for agent in players
+            }
+
+            # Return the same obs/terms/truncs from the last traffic step
+            obs = self._last_obs
+            terms = {agent: False for agent in players}
+            truncs = {agent: False for agent in players}
+            infos = {agent: {"raw_traffic_reward": self.last_rewards[agent],
+                             "action_mask": np.ones(sum(self.action_spaces[agent].nvec), dtype=np.float32)}
+                     for agent in players}
+
+            self.t += 1
+            infos = self._update_action_masks(infos)
+            return obs, final_rewards, terms, truncs, infos
 
     def _update_action_masks(self, infos):
-        """Append a valid mask for the sharing action to the traffic mask."""
         for agent, info in infos.items():
             if "action_mask" in info:
                 traffic_mask = info["action_mask"]
-                # All sharing actions (0% to 100%) are always legal
                 sharing_mask = np.ones(self.division + 1, dtype=np.float32)
-                
-                info["action_mask"] = np.concatenate(
-                    [traffic_mask, sharing_mask]
-                )
+                info["action_mask"] = np.concatenate([traffic_mask, sharing_mask])
         return infos
