@@ -294,7 +294,7 @@ def train_mappo(
     gae_lambda = 0.95
     clip_coef = 0.2
     update_epochs = 10
-    entropy_coef = 0.05
+    entropy_coef = 0.01
     value_coef = 0.5
     local_reward_weight = 0.7 if not use_peer_reward else 0.85
 
