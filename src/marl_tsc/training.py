@@ -274,7 +274,11 @@ def evaluate_policy(
                 
                 observations, rewards, _, truncations, infos = env.step(actions)
 
-                episode_reward += float(sum(rewards.values()))
+                episode_reward += float(sum(
+                    info.get("raw_traffic_reward", r)
+                    for info, r in zip(infos.values(), rewards.values())
+                ))
+                
                 for info in infos.values():
                     queue_sum += float(info.get("mean_local_queue", 0.0))
                     queue_count += 1
