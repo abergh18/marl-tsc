@@ -131,9 +131,9 @@ def train_ppo(
         vec_env,
         verbose=0,
         seed=seed,
-        learning_rate=3e-4,
+        learning_rate=1e-4,
         n_steps=1024,
-        batch_size=256,
+        batch_size=512,
         ent_coef=0.01,
     )
 
@@ -184,8 +184,8 @@ def _actions_from_policy(
         # for environments that don't have PeerRewardingWrapper
         cleaned = {}
         for agent, action in raw.items():
-            if isinstance(action, (list, tuple)):
-                cleaned[agent] = int(action[0])  # take only traffic action
+            if isinstance(action, (list, tuple, np.ndarray)):
+                cleaned[agent] = int(action[0])
             else:
                 cleaned[agent] = int(action)
         return cleaned
@@ -275,8 +275,8 @@ def evaluate_policy(
                 observations, rewards, _, truncations, infos = env.step(actions)
 
                 episode_reward += float(sum(
-                    info.get("raw_traffic_reward", r)
-                    for info, r in zip(infos.values(), rewards.values())
+                    infos.get(agent, {}).get("raw_traffic_reward", r)
+                    for agent, r in rewards.items()
                 ))
                 
                 for info in infos.values():
