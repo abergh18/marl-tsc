@@ -458,7 +458,21 @@ class SumoTrafficEnv(ParallelEnv):
         switch_cost = self.switch_penalty if switched else 0.0
         bounded_improvement = float(np.clip(queue_improvement, -5.0, 5.0))
         bounded_queue = min(mean_local_queue, self.max_queue_value)
-        return 0.25 * bounded_improvement - bounded_queue - switch_cost
+        # ── Throughput bonus ──────────────────────────────────────────────────────
+        # Vehicles departed from lanes controlled by this agent this step.
+        # Gives a positive signal during heavy congestion where queue improvement
+        # is hard to achieve.
+        try:
+            controlled_lanes = traci.trafficlight.getControlledLanes(agent)
+            departed = sum(
+                traci.lane.getLastStepVehicleNumber(lane)
+                for lane in set(controlled_lanes)
+            )
+            throughput_bonus = 0.1 * departed
+        except Exception:
+            throughput_bonus = 0.0
+
+        return 0.25 * bounded_improvement - bounded_queue - switch_cost + throughput_bonus
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
