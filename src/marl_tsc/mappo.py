@@ -29,7 +29,7 @@ def _stack_agent_masks(
     for agent in agent_ids:
         info = infos.get(agent) or {}
         mask = info.get("action_mask")
-        if mask is None:
+        if mask is None or len(mask) != total_action_dim:
             rows.append(np.ones(total_action_dim, dtype=np.float32))
         else:
             rows.append(np.asarray(mask, dtype=np.float32))
