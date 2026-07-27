@@ -181,10 +181,34 @@ class ZeroSumCalculator:
         Lupu, A. & Precup, D. (2020). Gifting in Multi-Agent Reinforcement
         Learning. Proceedings of AAMAS 2020.
     """
+    def __init__(self, num_divisions: int, proximity_matrix=None, agent_ids=None):
+        self.num_divisions    = num_divisions
+        self.portion_size     = 1.0 / num_divisions
+        self.proximity_matrix = proximity_matrix  # None = uniform (existing behaviour)
+        self.agent_ids        = agent_ids         # needed to index proximity_matrix
 
-    def __init__(self, num_divisions: int):
-        self.num_divisions = num_divisions
-        self.portion_size = 1.0 / num_divisions
+    def _get_weights(self, agent: str, agent_ids: list) -> dict:
+        """
+        Return normalised weights for distributing agent's gift to peers.
+        Uniform if no proximity_matrix, proximity-weighted otherwise.
+        """
+        if self.proximity_matrix is None or self.agent_ids is None:
+            # Original behaviour — equal split
+            n = len(agent_ids) - 1
+            return {other: 1.0 / n for other in agent_ids if other != agent}
+
+        i = self.agent_ids.index(agent)
+        raw = {
+            other: float(self.proximity_matrix[i][self.agent_ids.index(other)])
+            for other in agent_ids
+            if other != agent
+        }
+        total = sum(raw.values())
+        if total == 0:
+            # Fallback to uniform if no proximity connections
+            n = len(agent_ids) - 1
+            return {other: 1.0 / n for other in agent_ids if other != agent}
+        return {other: w / total for other, w in raw.items()}
 
     def redistribute(
         self,
@@ -192,69 +216,28 @@ class ZeroSumCalculator:
         gifting_actions: dict[str, int],
         agent_ids: list[str],
     ) -> dict[str, float]:
-        """
-        Apply zero-sum redistribution to a single timestep's rewards.
-
-        Parameters
-        ----------
-        rewards : dict[str, float]
-            Raw per-agent rewards from env.step().
-        gifting_actions : dict[str, int]
-            Discrete gifting action per agent (0..num_divisions).
-            Action k means gift k/num_divisions of abs(reward) to peers.
-        agent_ids : list[str]
-            Ordered list of agent IDs.
-
-        Returns
-        -------
-        dict[str, float]
-            Redistributed rewards. Sum equals sum of input rewards.
-        """
         num_agents = len(agent_ids)
-
         if num_agents < 2:
             return rewards
 
-        # Compute gift amounts from abs(reward)
         gifts = {
             agent: gifting_actions[agent] * self.portion_size * abs(rewards[agent])
             for agent in agent_ids
         }
 
-        # Each gift split equally among num_agents - 1 peers
-        shares = {
-            agent: gifts[agent] / (num_agents - 1)
-            for agent in agent_ids
-        }
+        redistributed = {agent: rewards[agent] - gifts[agent] for agent in agent_ids}
 
-        # Agent i loses its gift, gains one share from every other agent
-        redistributed = {}
         for agent in agent_ids:
-            received = sum(
-                shares[other]
-                for other in agent_ids
-                if other != agent
-            )
-            redistributed[agent] = rewards[agent] - gifts[agent] + received
+            if gifts[agent] == 0:
+                continue
+            weights = self._get_weights(agent, agent_ids)
+            for other, w in weights.items():
+                redistributed[other] += gifts[agent] * w
 
         return redistributed
 
-    def stats(
-        self,
-        rewards: dict[str, float],
-        gifting_actions: dict[str, int],
-        agent_ids: list[str],
-    ) -> dict[str, float]:
-        """
-        Compute gifting statistics for logging.
-
-        Returns
-        -------
-        dict with keys:
-            mean_gift_fraction  — average fraction of reward gifted
-            gift_rate           — fraction of agents who gifted non-zero
-            mean_gift_amount    — average absolute reward transferred
-        """
+    def stats(self, rewards, gifting_actions, agent_ids):
+        # unchanged
         fractions = [
             gifting_actions[agent] * self.portion_size
             for agent in agent_ids
@@ -265,8 +248,8 @@ class ZeroSumCalculator:
         ]
         return {
             "mean_gift_fraction": float(sum(fractions) / len(fractions)),
-            "gift_rate": float(sum(1 for f in fractions if f > 0) / len(fractions)),
-            "mean_gift_amount": float(sum(amounts) / len(amounts)),
+            "gift_rate":          float(sum(1 for f in fractions if f > 0) / len(fractions)),
+            "mean_gift_amount":   float(sum(amounts)   / len(amounts)),
         }
 
 
@@ -294,15 +277,15 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
         Number of discrete gifting portions. Defaults to num_agents - 1
         for clean equal-split granularity, but can be set independently.
     """
-
-    def __init__(self, env, division: int | None = None):
+    def __init__(self, env, division=None, proximity_matrix=None, agent_ids=None):
         super().__init__(env)
-
-        num_agents = len(self.possible_agents)
+        num_agents    = len(self.possible_agents)
         self.division = division if division is not None else max(1, num_agents - 1)
-        self.calculator = ZeroSumCalculator(num_divisions=self.division)
-
-        # Extend action space: [Traffic Phase, Gifting Fraction]
+        self.calculator = ZeroSumCalculator(
+            num_divisions=self.division,
+            proximity_matrix=proximity_matrix,
+            agent_ids=agent_ids,
+        )
         self.action_spaces = {
             agent: MultiDiscrete([
                 env.action_space(agent).n,
