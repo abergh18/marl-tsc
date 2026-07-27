@@ -110,7 +110,8 @@ class PeerRewardingWrapper(BaseParallelWrapper):
 
             for agent in players:
                 infos[agent]["raw_traffic_reward"] = self.last_rewards[agent]
-
+                
+            self._last_obs = obs
             self.t += 1
             infos = self._update_action_masks(infos)
             return obs, zero_rewards, terms, truncs, infos
