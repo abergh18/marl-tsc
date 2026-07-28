@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -85,12 +84,22 @@ class MappoModel:
         observation: np.ndarray,
         mask: np.ndarray | None = None,
         deterministic: bool = True,
+        agent_index: int = 0,
     ) -> list[int] | int:
         import torch
         from torch.distributions import Categorical
 
+        observation = np.asarray(observation, dtype=np.float32)
+        agent_identity = np.zeros(len(self.traffic_light_ids), dtype=np.float32)
+        
+        # Ensure agent_index is within bounds for safety during zero-shot transfer
+        if agent_index < len(agent_identity):
+            agent_identity[agent_index] = 1.0
+            
+        actor_observation = np.concatenate([observation, agent_identity])
+        
         obs_tensor = torch.as_tensor(
-            np.asarray(observation, dtype=np.float32),
+            actor_observation,
             dtype=torch.float32,
             device=self.device,
         )
@@ -138,7 +147,7 @@ class MappoModel:
         deterministic: bool = True,
     ) -> dict[str, list[int] | int]:
         actions: dict[str, list[int] | int] = {}
-      
+        
         active_agents = list(observations.keys())
         
         for agent_id in active_agents:
@@ -146,11 +155,21 @@ class MappoModel:
             if infos is not None:
                 info = infos.get(agent_id) or {}
                 mask = info.get("action_mask")
+                
+            # Safely get the index for the identity vector (defaults to 0 for unseen networks)
+            try:
+                agent_index = self.traffic_light_ids.index(agent_id)
+            except ValueError:
+                agent_index = 0
+                
             actions[agent_id] = self._act_single(
-                observations[agent_id], mask=mask, deterministic=deterministic
+                observations[agent_id],
+                mask=mask,
+                deterministic=deterministic,
+                agent_index=agent_index,
             )
         return actions
-    
+
     def predict(self, observation: np.ndarray, deterministic: bool = True):
         return self._act_single(observation, deterministic=deterministic), None
 
@@ -178,6 +197,7 @@ def train_mappo(
     from torch.distributions import Categorical
     from torch.optim import Adam
     from collections import deque
+    from pathlib import Path
 
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -237,6 +257,8 @@ def train_mappo(
                 nn.LayerNorm(hidden_size),
                 nn.ReLU(),
             )
+            nn.init.zeros_(self.base[-1].weight)
+            nn.init.zeros_(self.base[-1].bias)
 
             self.branches = nn.ModuleList([
                 nn.Linear(hidden_size, dim) for dim in action_dims
@@ -275,7 +297,14 @@ def train_mappo(
     if env_options.get("include_phase_queue_features", True):
         phase_queue_start = int(env.max_lanes_per_tls) + 2
 
-    actor = Actor(obs_dim, action_dims, phase_queue_start=phase_queue_start).to(device)
+    # Update obs_size to include the identity vector
+    actor_obs_dim = obs_dim + num_agents
+    actor = Actor(
+        obs_size=actor_obs_dim, 
+        action_dims=action_dims, 
+        phase_queue_start=phase_queue_start
+    ).to(device)
+    
     critic = Critic(obs_dim * num_agents).to(device)
 
     learning_rate = 5e-5
@@ -320,11 +349,13 @@ def train_mappo(
 
         while len(rollout_rewards) < rollout_steps and global_steps < total_timesteps:
             local_obs = _stack_agent_observations(observations, agent_ids)
+            agent_identity = np.eye(num_agents, dtype=np.float32)
+            actor_obs = np.concatenate([local_obs, agent_identity], axis=1)
             central_obs = local_obs.reshape(-1)
             mask_array = _stack_agent_masks(infos, agent_ids, total_action_dim)
 
             with torch.no_grad():
-                local_obs_tensor = torch.as_tensor(local_obs, dtype=torch.float32, device=device)
+                local_obs_tensor = torch.as_tensor(actor_obs, dtype=torch.float32, device=device)
                 central_obs_tensor = torch.as_tensor(central_obs, dtype=torch.float32, device=device)
                 mask_tensor = torch.as_tensor(mask_array, dtype=torch.float32, device=device)
 
@@ -369,7 +400,7 @@ def train_mappo(
             blended_rewards = np.clip(blended_rewards, -10.0, 10.0)
             done = bool(any(terminations.values()) or any(truncations.values()))
 
-            rollout_local_obs.append(local_obs)
+            rollout_local_obs.append(actor_obs)
             rollout_central_obs.append(central_obs)
 
             combined_actions = torch.stack([act_t, act_s], dim=-1)
@@ -478,7 +509,11 @@ def train_mappo(
             )
 
             policy_loss = -torch.min(unclipped, clipped).mean()
-            value_loss = F.mse_loss(critic(central_obs_batch), return_batch)
+            
+            # Using the stabilised smooth L1 loss from the main branch
+            predicted_values = critic(central_obs_batch)
+            value_loss = F.smooth_l1_loss(predicted_values, return_batch)
+            
             loss = policy_loss + value_coef * value_loss - entropy_coef * entropy_loss
 
             optimizer.zero_grad()
@@ -512,6 +547,7 @@ def train_mappo(
             "algorithm_name": policy_label,
             "traffic_light_ids": list(agent_ids),
             "obs_dim": obs_dim,
+            "actor_obs_dim": actor_obs_dim,
             "action_dims": action_dims,
             "num_agents": num_agents,
             "total_timesteps": total_timesteps,
@@ -526,7 +562,6 @@ def train_mappo(
             "entropy_coef": entropy_coef,
             "value_coef": value_coef,
             "local_reward_weight": local_reward_weight,
-            "phase_queue_start": phase_queue_start,
             "env_kwargs": env_options,
         },
         device=str(device),
@@ -543,9 +578,6 @@ def train_mappo(
         },
         model_path,
     )
-
-    env.close()
-    return model, history, model_path
 
     env.close()
     return model, history, model_path

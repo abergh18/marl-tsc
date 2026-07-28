@@ -51,9 +51,9 @@ def train_graph_ctde(
     actor_learning_rate=1e-3,
     critic_learning_rate=3e-3,
     hidden_dim=64,
-    #gamma=0.99,
     gae_lambda=0.95,
     env_kwargs=None,
+    entropy_coef=5e-2,
 ):
     """
     Train a graph-based CTDE actor-critic.
@@ -96,16 +96,18 @@ def train_graph_ctde(
         )
 
         #
-        # Infer action dimension
+        # Infer action dimension(s)
         #
 
         first_agent = (
             traffic_light_ids[0]
         )
 
-        action_dim = (
-            env.action_spaces[first_agent].n
-        )
+        space = env.action_spaces[first_agent]
+        if hasattr(space, 'nvec'):
+            action_dims = list(space.nvec)
+        else:
+            action_dims = [space.n]
 
         #
         # Build policy
@@ -114,7 +116,7 @@ def train_graph_ctde(
         policy = (
             build_default_graph_policy(
                 obs_dim=obs_dim,
-                action_dim=action_dim,
+                action_dims=action_dims,
                 hidden_dim=hidden_dim,
             )
         )
@@ -123,10 +125,6 @@ def train_graph_ctde(
         # Optimizer
         #
 
-        '''optimizer = torch.optim.Adam(
-            policy.parameters(),
-            lr=learning_rate,
-        )'''
         actor_optimizer = torch.optim.Adam(
             list(policy.encoder.parameters())
             + list(policy.actor_head.parameters()),
@@ -145,12 +143,11 @@ def train_graph_ctde(
         trainer = GraphCTDETrainer(
             env=env,
             policy=policy,
-            #optimizer=optimizer,
             actor_optimizer=actor_optimizer,
             critic_optimizer=critic_optimizer,
             rollout_steps=rollout_steps,
-            #gamma=gamma,
             gae_lambda=gae_lambda,
+            entropy_coef=entropy_coef,
         )
 
         #

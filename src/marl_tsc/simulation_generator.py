@@ -1,14 +1,17 @@
-"""Generate a small SUMO grid for MARL traffic-signal-control experiments."""
+"""Generate SUMO files for MARL traffic-signal-control experiments."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
-import runpy
-from pathlib import Path
 import os
+import runpy
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Sequence
+
+from marl_tsc.network_types import GridNetwork, NetworkType
 
 
 @dataclass
@@ -20,6 +23,7 @@ class SimulationPaths:
     trips_file: Path
     routes_file: Path
     config_file: Path
+    traffic_light_ids: tuple[str, ...]
 
 
 class SimulationGenerator:
@@ -30,8 +34,7 @@ class SimulationGenerator:
         trips_filename: str = "trips.trips.xml",
         routes_filename: str = "routes.rou.xml",
         config_filename: str = "config.sumocfg",
-        grid_number: int = 4,
-        lane_number: int = 1,
+        network: NetworkType | None = None,
         traffic_light_ids: Sequence[str] | None = None,
         trip_begin: int = 0,
         trip_end: int = 1000,
@@ -43,7 +46,7 @@ class SimulationGenerator:
         min_distance: int | None = None,
         vtypes_file: str | Path | None = None,
     ) -> None:
-        """Create a SUMO grid network, traffic demand, routes, and config."""
+        """Create a SUMO network, traffic demand, routes, and config."""
 
         self.output_dir = Path(output_dir)
         self.network_filename = network_filename
@@ -51,8 +54,7 @@ class SimulationGenerator:
         self.routes_filename = routes_filename
         self.config_filename = config_filename
 
-        self.grid_number = grid_number
-        self.lane_number = lane_number
+        self.network = network or GridNetwork()
         self.traffic_light_ids = tuple(traffic_light_ids) if traffic_light_ids else None
 
         self.trip_begin = trip_begin
@@ -76,13 +78,16 @@ class SimulationGenerator:
     def discover_traffic_light_ids(self) -> tuple[str, ...]:
         """Read traffic light IDs directly from the network file."""
         import sumolib
+        
         net = sumolib.net.readNet(str(self.network_file))
         ids = tuple(tls.getID() for tls in net.getTrafficLights())
+        
         if not ids:
             raise ValueError(f"No traffic lights found in {self.network_file}")
+            
         print(f"Discovered {len(ids)} traffic lights: {list(ids)}")
         return ids
-    
+
     def _random_trips_argv(
         self,
         *,
@@ -112,17 +117,17 @@ class SimulationGenerator:
 
         if self.random_depart:
             argv.append("--random-depart")
-            
+
         if self.min_distance is not None:
             argv.extend(["--min-distance", str(self.min_distance)])
-            
+
         if self.vtypes_file is not None:
             argv.extend(["--additional-files", str(self.vtypes_file)])
             argv.extend(["--vehicle-class", "passenger"])
 
         argv.extend(["--edge-permission", "passenger"])
         argv.extend(["--speed-exponent", "2"])
-        
+
         return argv
 
     def _run_random_trips(self, argv: list[str]) -> None:
@@ -160,6 +165,7 @@ class SimulationGenerator:
             trips_file=self.trips_file,
             routes_file=self.routes_file,
             config_file=self.config_file,
+            traffic_light_ids=self.traffic_light_ids,
         )
 
     def run_command(self, command: list[str]) -> None:
@@ -167,34 +173,37 @@ class SimulationGenerator:
         subprocess.run(command, check=True)
 
     def generate_network(self) -> Path:
-        """Generate the SUMO network XML file."""
+        """Generate the SUMO network XML file and detect its traffic lights."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
-    
-        if self.traffic_light_ids is None:
-            self.traffic_light_ids = self.discover_traffic_light_ids()
-    
+
+        # Delegate network generation to the newly integrated NetworkType class
+        self.network.generate(self.output_dir, self.network_file, self.run_command)
+
+        # If traffic light IDs were not explicitly provided, detect them
         if not self.traffic_light_ids:
-            raise ValueError("traffic_light_ids must contain at least one junction ID.")
-    
-        command = [
-            "netgenerate",
-            "--grid",
-            f"--grid.number={self.grid_number}",
-            f"--default.lanenumber={self.lane_number}",
-            "--tls.layout",
-            "incoming",
-            "--tls.set",
-            ",".join(self.traffic_light_ids),
-            "-o",
-            str(self.network_file),
-        ]
-        self.run_command(command)
+            self.traffic_light_ids = self.detect_traffic_light_ids()
+
+        if not self.traffic_light_ids:
+            raise ValueError(f"No traffic lights were found in {self.network_file}.")
+
         return self.network_file
 
+    def detect_traffic_light_ids(self) -> tuple[str, ...]:
+        """Read the generated network and return its traffic-light ids."""
+        tree = ET.parse(self.network_file)
+        traffic_light_ids = []
+        for element in tree.iter():
+            if element.tag.endswith("tlLogic"):
+                traffic_light_id = element.attrib.get("id")
+                if traffic_light_id and traffic_light_id not in traffic_light_ids:
+                    traffic_light_ids.append(traffic_light_id)
+        return tuple(traffic_light_ids)
+
     def generate_trips(self) -> Path:
+        """Generate trips and route files for the generated network."""
         if self.traffic_light_ids is None:
             self.traffic_light_ids = self.discover_traffic_light_ids()
-        """Generate trips and route files for the generated network."""
+            
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.network_file.exists():
@@ -213,6 +222,7 @@ class SimulationGenerator:
             trip_fringe_factor=self.trip_fringe_factor,
             allow_fringe=self.allow_fringe,
         )
+        
         try:
             self._run_random_trips(argv)
         except subprocess.CalledProcessError:
@@ -230,15 +240,13 @@ class SimulationGenerator:
     def generate_peak_trips(self, peak_end: int = 1800, peak_period: float = 1.0, offpeak_period: float = 3.0) -> Path:
         """Generate realistic peak/off-peak demand pattern."""
 
-        # Discover traffic light IDs if not already set
+        # Discover traffic light IDs if not already initialised
         if self.traffic_light_ids is None:
             self.traffic_light_ids = self.discover_traffic_light_ids()
-        
-        import xml.etree.ElementTree as ET
-    
+
         peak_trips = self.output_dir / "peak.trips.xml"
         offpeak_trips = self.output_dir / "offpeak.trips.xml"
-    
+
         base_args = [
             sys.executable, str(self.random_trips_file),
             "-n", str(self.network_file),
@@ -249,11 +257,13 @@ class SimulationGenerator:
             "--random-depart",
             "--seed", str(self.seed),
         ]
+        
         if self.min_distance is not None:
             base_args.extend(["--min-distance", str(self.min_distance)])
+            
         if self.vtypes_file is not None:
             base_args.extend(["--additional-files", str(self.vtypes_file)])
-    
+
         # Peak trips
         subprocess.run(base_args + [
             "-o", str(peak_trips),
@@ -262,7 +272,7 @@ class SimulationGenerator:
             "--period", str(peak_period),
             "--prefix", "peak_",
         ], check=True)
-    
+
         # Off-peak trips
         subprocess.run(base_args + [
             "-o", str(offpeak_trips),
@@ -271,7 +281,7 @@ class SimulationGenerator:
             "--period", str(offpeak_period),
             "--prefix", "offpeak_",
         ], check=True)
-    
+
         # Merge with duarouter
         subprocess.run([
             "duarouter",
@@ -282,7 +292,7 @@ class SimulationGenerator:
             "--seed", str(self.seed),
             "--no-step-log",
         ], check=True)
-    
+
         return self.routes_file
 
     def generate_config(self) -> Path:

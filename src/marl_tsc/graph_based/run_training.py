@@ -50,6 +50,12 @@ def run_training(
     timestep = 0
     update = 0
 
+    # Save roughly every 100k timesteps.
+    CHECKPOINT_EVERY = max(
+        1,
+        100_000 // rollout_steps,
+    )
+
     while timestep < total_timesteps:
 
         update += 1
@@ -62,13 +68,10 @@ def run_training(
             {
                 "algorithm": algorithm_name,
                 "timestep": timestep,
-                
                 "mean_training_reward": stats.get(
                     "mean_training_reward",
                     0.0,
                 ),
-                
-
                 "actor_loss": stats.get(
                     "actor_loss",
                     0.0,
@@ -84,6 +87,43 @@ def run_training(
             }
         )
 
+        #
+        # Save checkpoint
+        #
+        if (
+            model_path is not None
+            and update % CHECKPOINT_EVERY == 0
+        ):
+
+            checkpoint_path = (
+                Path(model_path)
+                .with_suffix("")
+                .parent
+                / f"{Path(model_path).stem}_{timestep}.pt"
+            )
+
+            checkpoint_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            torch.save(
+                {
+                    "timestep": timestep,
+                    "update": update,
+                    "model_state_dict": trainer.policy.state_dict(),
+                    "history": history,
+                },
+                checkpoint_path,
+            )
+
+            print(
+                f"Checkpoint saved: {checkpoint_path}"
+            )
+
+        #
+        # Training log
+        #
         if update % log_interval == 0:
 
             print(
@@ -92,6 +132,9 @@ def run_training(
                 f"Critic {stats.get('critic_loss', 0.0):.4f}"
             )
 
+    #
+    # Save final model
+    #
     if model_path is not None:
 
         model_path = Path(model_path)

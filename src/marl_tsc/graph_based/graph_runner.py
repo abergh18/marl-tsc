@@ -46,9 +46,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
 import torch
+import numpy as np
 from torch.distributions import Categorical
+from torch_geometric.data import Data
 
 
 @dataclass
@@ -56,10 +57,10 @@ class Transition:
     observation: object
     action_dict: dict
     log_prob: torch.Tensor
-    logits: list[torch.Tensor]       # Now a list holding [traffic, sharing]
+    logits: object        # Can be torch.Tensor or list[torch.Tensor]
     value: torch.Tensor
     reward_dict: dict
-    action_masks: list[torch.Tensor] # Now a list holding [traffic, sharing]
+    action_masks: object  # Can be torch.Tensor or list[torch.Tensor]
     done: bool
 
 
@@ -73,15 +74,40 @@ class GraphRunner:
         self.env = env
         self.policy = policy
 
-        # Persisted across collect_rollout() calls. None until the first call,
-        # at which point a fresh reset happens. After that, this carries over 
-        # between rollouts unless the previous rollout ended in a terminal state.
+        # CHANGED: persisted across collect_rollout() calls. None
+        # until the first call, at which point a fresh reset happens.
+        # After that, this carries over between rollouts unless the
+        # previous rollout ended in a genuine terminal state.
         self._current_obs = None
         self._current_infos = None
 
-        # Exposed so base_trainer.collect_batch() can fetch a bootstrap value 
-        # for GAE from whatever observation comes right after the rollout.
+        # CHANGED: exposed so base_trainer.collect_batch() can fetch
+        # a bootstrap value for GAE from whatever observation comes
+        # right after the most recently collected rollout.
         self.last_observation = None
+
+    def _move_graph_obs_to_device(self, graph_obs):
+        device = next(self.policy.parameters()).device
+
+        graph = Data(
+            x=graph_obs.graph.x.to(device),
+            edge_index=graph_obs.graph.edge_index.to(device),
+        )
+
+        # Carry through het graph attributes if present
+        if hasattr(graph_obs.graph, 'connection_x'):
+            graph.connection_x = graph_obs.graph.connection_x.to(device)
+        if hasattr(graph_obs.graph, 'agent_mask'):
+            graph.agent_mask = graph_obs.graph.agent_mask.to(device)
+
+        from marl_tsc.graph_based.graph_types import GraphObservation
+
+        return GraphObservation(
+            graph=graph,
+            agent_ids=graph_obs.agent_ids,
+            global_state=graph_obs.global_state.to(device) if graph_obs.global_state is not None else None,
+            metadata=graph_obs.metadata,
+        )
 
     def collect_rollout(
         self,
@@ -91,9 +117,9 @@ class GraphRunner:
 
         rollout = []
 
-        # Only reset if this is the very first call, or if the previous 
-        # rollout actually ended in a terminal state. Otherwise, continue 
-        # from wherever the last rollout left off.
+        # CHANGED: only reset if this is the very first call, or if
+        # the previous rollout actually ended in a terminal state.
+        # Otherwise continue from wherever the last rollout left off.
         if self._current_obs is None:
             graph_obs, infos = self.env.reset(seed=seed)
             self._current_obs = graph_obs
@@ -103,62 +129,71 @@ class GraphRunner:
         infos = self._current_infos
 
         for _ in range(num_steps):
-            policy_output = self.policy(graph_obs)
+            
+            # Move graph observation to policy device
+            graph_obs_device = self._move_graph_obs_to_device(graph_obs)
 
-            # 1. Unpack the two branches of logits
-            traffic_logits, sharing_logits = policy_output.logits
+            policy_output = self.policy(graph_obs_device)
 
-            # 2. Get the combined flat masks from the environment
-            flat_masks = np.stack([
+            # Get the combined flat masks from the environment
+            masks = np.stack([
                 infos[agent]["action_mask"]
                 for agent in graph_obs.agent_ids
             ])
 
-            flat_mask_tensor = (
-                torch.from_numpy(flat_masks)
+            # We use policy_output.value.device as a safe device reference
+            mask_tensor = (
+                torch.from_numpy(masks)
                 .bool()
-                .to(traffic_logits.device)
+                .to(policy_output.value.device)
             )
 
-            # 3. Split the flat mask back into traffic and sharing parts
-            traffic_dim = traffic_logits.shape[-1]
-            traffic_mask = flat_mask_tensor[:, :traffic_dim]
-            sharing_mask = flat_mask_tensor[:, traffic_dim:]
+            # Handle both standard single-action and multi-discrete (Gifting) actions
+            if isinstance(policy_output.logits, (list, tuple)):
+                traffic_logits, sharing_logits = policy_output.logits
+                
+                # Split the flat mask back into traffic and sharing parts
+                traffic_dim = traffic_logits.shape[-1]
+                traffic_mask = mask_tensor[:, :traffic_dim]
+                sharing_mask = mask_tensor[:, traffic_dim:]
 
-            # 4. Apply the correct masks to prevent illegal actions
-            masked_traffic_logits = traffic_logits.masked_fill(
-                ~traffic_mask,
-                -1e9,
-            )
-            masked_sharing_logits = sharing_logits.masked_fill(
-                ~sharing_mask,
-                -1e9,
-            )
+                # Apply the correct masks
+                masked_traffic_logits = traffic_logits.masked_fill(~traffic_mask, -1e9)
+                masked_sharing_logits = sharing_logits.masked_fill(~sharing_mask, -1e9)
 
-            # 5. Create distributions for both action types
-            dist_traffic = Categorical(logits=masked_traffic_logits)
-            dist_sharing = Categorical(logits=masked_sharing_logits)
+                # Create distributions
+                dist_traffic = Categorical(logits=masked_traffic_logits)
+                dist_sharing = Categorical(logits=masked_sharing_logits)
 
-            # Sample actions from both distributions
-            traffic_actions = dist_traffic.sample()
-            sharing_actions = dist_sharing.sample()
+                # Sample actions
+                traffic_actions = dist_traffic.sample()
+                sharing_actions = dist_sharing.sample()
 
-            # 6. Calculate the joint log probability 
-            # (summing them combines the mathematical probability)
-            log_probs = (
-                dist_traffic.log_prob(traffic_actions)
-                + dist_sharing.log_prob(sharing_actions)
-            )
+                # Calculate joint log probability 
+                log_probs = dist_traffic.log_prob(traffic_actions) + dist_sharing.log_prob(sharing_actions)
 
-            # 7. Create the two-part action dictionary for the environment
-            action_dict = {
-                agent_id: [int(t_act), int(s_act)]
-                for agent_id, t_act, s_act in zip(
-                    graph_obs.agent_ids,
-                    traffic_actions,
-                    sharing_actions,
-                )
-            }
+                # Create the two-part action dictionary for the environment
+                action_dict = {
+                    agent_id: [int(t_act), int(s_act)]
+                    for agent_id, t_act, s_act in zip(graph_obs.agent_ids, traffic_actions, sharing_actions)
+                }
+                
+                transition_logits = [masked_traffic_logits.detach(), masked_sharing_logits.detach()]
+                transition_masks = [traffic_mask.cpu(), sharing_mask.cpu()]
+
+            else:
+                masked_logits = policy_output.logits.masked_fill(~mask_tensor, -1e9)
+                dist = Categorical(logits=masked_logits)
+                actions = dist.sample()
+                log_probs = dist.log_prob(actions)
+
+                action_dict = {
+                    agent_id: int(action)
+                    for agent_id, action in zip(graph_obs.agent_ids, actions)
+                }
+                
+                transition_logits = masked_logits.detach()
+                transition_masks = mask_tensor.cpu()
 
             (
                 next_graph_obs,
@@ -168,24 +203,17 @@ class GraphRunner:
                 infos,
             ) = self.env.step(action_dict)
 
-            done = (
-                any(terminations.values())
-                or any(truncations.values())
-            )
+            done = any(terminations.values()) or any(truncations.values())
 
-            # 8. Store both sets of logits and masks in the Transition
             rollout.append(
                 Transition(
-                    observation=graph_obs,
+                    observation=graph_obs_device,
                     action_dict=action_dict,
                     log_prob=log_probs.detach(),
-                    logits=[
-                        masked_traffic_logits.detach(),
-                        masked_sharing_logits.detach()
-                    ],
+                    logits=transition_logits,
                     value=policy_output.value.detach(),
                     reward_dict=rewards,
-                    action_masks=[traffic_mask.cpu(), sharing_mask.cpu()],
+                    action_masks=transition_masks,
                     done=done,
                 )
             )
@@ -193,15 +221,17 @@ class GraphRunner:
             graph_obs = next_graph_obs
 
             if done:
-                # Episode genuinely ended -- reset now so the NEXT call 
-                # starts fresh, but still finish out this rollout cleanly.
+                # CHANGED: episode genuinely ended -- reset now so
+                # the NEXT collect_rollout() call starts fresh, but
+                # still finish out this rollout's transitions list
+                # cleanly via break, same as before.
                 graph_obs, infos = self.env.reset()
                 break
 
-        # Persist state for the next call, and expose the post-rollout 
-        # observation for the GAE bootstrap fetch.
+        # CHANGED: persist state for the next call, and expose the
+        # post-rollout observation for the GAE bootstrap fetch.
         self._current_obs = graph_obs
         self._current_infos = infos
-        self.last_observation = graph_obs
+        self.last_observation = self._move_graph_obs_to_device(graph_obs)
 
         return rollout
