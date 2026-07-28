@@ -131,25 +131,25 @@ class MappoModel:
 
         return actions if len(actions) > 1 else actions[0]
 
-def act(
-    self,
-    observations: dict[str, np.ndarray],
-    infos: dict[str, dict] | None = None,
-    deterministic: bool = True,
-) -> dict[str, list[int] | int]:
-    actions: dict[str, list[int] | int] = {}
-  
-    active_agents = list(observations.keys())
-    
-    for agent_id in active_agents:
-        mask = None
-        if infos is not None:
-            info = infos.get(agent_id) or {}
-            mask = info.get("action_mask")
-        actions[agent_id] = self._act_single(
-            observations[agent_id], mask=mask, deterministic=deterministic
-        )
-    return actions
+    def act(
+        self,
+        observations: dict[str, np.ndarray],
+        infos: dict[str, dict] | None = None,
+        deterministic: bool = True,
+    ) -> dict[str, list[int] | int]:
+        actions: dict[str, list[int] | int] = {}
+      
+        active_agents = list(observations.keys())
+        
+        for agent_id in active_agents:
+            mask = None
+            if infos is not None:
+                info = infos.get(agent_id) or {}
+                mask = info.get("action_mask")
+            actions[agent_id] = self._act_single(
+                observations[agent_id], mask=mask, deterministic=deterministic
+            )
+        return actions
     
     def predict(self, observation: np.ndarray, deterministic: bool = True):
         return self._act_single(observation, deterministic=deterministic), None
