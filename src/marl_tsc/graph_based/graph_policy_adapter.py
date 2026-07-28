@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import torch
+from torch.distributions import Categorical
+from torch_geometric.data import Data
 
 from marl_tsc.graph_based.graph_builder import GraphBuilder
 from marl_tsc.graph_based.graph_types import GraphObservation
-
-from torch_geometric.data import Data
-from torch.distributions import Categorical
 
 
 class GraphPolicyAdapter:
@@ -15,7 +14,7 @@ class GraphPolicyAdapter:
         self,
         graph_policy,
         topology,
-        policy_name = None,
+        policy_name=None,
     ):
         self.policy = graph_policy
         self.topology = topology
@@ -53,27 +52,36 @@ class GraphPolicyAdapter:
             global_state=x.flatten(),
         )
 
-        output = self.policy(
-            graph_obs
-        )
+        output = self.policy(graph_obs)
 
-        if deterministic:
-            actions = (
-                output.logits.argmax(
-                    dim=-1
+        # Safely handle both single actions and multi-discrete (Gifting) actions
+        if isinstance(output.logits, (tuple, list)):
+            if deterministic:
+                actions = torch.stack(
+                    [logits.argmax(dim=-1) for logits in output.logits],
+                    dim=-1,
                 )
-            )
+            else:
+                actions = torch.stack(
+                    [
+                        Categorical(logits=logits).sample()
+                        for logits in output.logits
+                    ],
+                    dim=-1,
+                )
         else:
-            dist = Categorical(
-                logits=output.logits
-            )
-            actions = dist.sample()
+            if deterministic:
+                actions = output.logits.argmax(dim=-1)
+            else:
+                dist = Categorical(logits=output.logits)
+                actions = dist.sample()
 
-        # Bring actions back to CPU if necessary for zip/int casting (safer for loop extraction)
+        # Bring actions back to CPU if necessary for zip/int casting
         actions_cpu = actions.cpu()
 
+        # Extract standard integers for single actions, or lists for multi-discrete
         return {
-            agent_id: int(action)
+            agent_id: action.tolist() if actions_cpu.ndim > 1 else int(action)
             for agent_id, action in zip(
                 self.topology.agent_ids,
                 actions_cpu,

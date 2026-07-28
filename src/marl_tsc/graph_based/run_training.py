@@ -68,22 +68,18 @@ def run_training(
             {
                 "algorithm": algorithm_name,
                 "timestep": timestep,
-
                 "mean_training_reward": stats.get(
                     "mean_training_reward",
                     0.0,
                 ),
-
                 "actor_loss": stats.get(
                     "actor_loss",
                     0.0,
                 ),
-
                 "critic_loss": stats.get(
                     "critic_loss",
                     0.0,
                 ),
-
                 "total_loss": stats.get(
                     "total_loss",
                     0.0,

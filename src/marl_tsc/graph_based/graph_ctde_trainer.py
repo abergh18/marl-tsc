@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections import Counter
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
-from collections import Counter
 
 from .base_trainer import BaseGraphTrainer
 
@@ -12,12 +13,25 @@ from .base_trainer import BaseGraphTrainer
 def get_grad_norm(parameters):
     """Compute the total L2 norm of gradients for a set of parameters."""
     parameters = [p for p in parameters if p.grad is not None]
+
     if len(parameters) == 0:
         return 0.0
+
     total_norm = torch.norm(
-        torch.stack([torch.norm(p.grad.detach(), 2) for p in parameters]), 2
+        torch.stack(
+            [
+                torch.norm(
+                    p.grad.detach(),
+                    2
+                )
+                for p in parameters
+            ]
+        ),
+        2,
     )
+
     return total_norm.item()
+
 
 class RunningMeanStd:
 
@@ -27,6 +41,7 @@ class RunningMeanStd:
         self.count = 1e-4
 
     def update(self, x):
+
         x = np.asarray(x)
 
         batch_mean = x.mean()
@@ -35,15 +50,27 @@ class RunningMeanStd:
 
         delta = batch_mean - self.mean
 
-        total_count = self.count + batch_count
+        total_count = (
+            self.count
+            + batch_count
+        )
 
         new_mean = (
             self.mean
-            + delta * batch_count / total_count
+            + delta
+            * batch_count
+            / total_count
         )
 
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
+        m_a = (
+            self.var
+            * self.count
+        )
+
+        m_b = (
+            batch_var
+            * batch_count
+        )
 
         m2 = (
             m_a
@@ -67,28 +94,29 @@ class GraphCTDETrainer(BaseGraphTrainer):
 
     def __init__(
         self,
-      env,
-      policy,
-      actor_optimizer,
-      critic_optimizer,
-      entropy_coef = 5e-2,
-      rollout_steps=64,
-      gae_lambda=0.95,
-
+        env,
+        policy,
+        actor_optimizer,
+        critic_optimizer,
+        entropy_coef=5e-2,
+        rollout_steps=64,
+        gae_lambda=0.95,
     ):
+
         super().__init__(
             env=env,
             policy=policy,
-            #optimizer=optimizer,
             rollout_steps=rollout_steps,
             gae_lambda=gae_lambda,
-            #actor_optimizer = actor_optimizer,
-            #critic_optimizer = critic_optimizer
         )
+
         self.value_normalizer = RunningMeanStd()
+
         self.actor_encoder_optimizer = actor_optimizer
         self.critic_optimizer = critic_optimizer
+
         self.entropy_coef = entropy_coef
+
 
     def update(
         self,
@@ -99,27 +127,15 @@ class GraphCTDETrainer(BaseGraphTrainer):
         advantages = advantage_batch.advantages
         returns = advantage_batch.returns
 
-        #
-        # -------------------------------------------------
-        # Value normalisation
-        # -------------------------------------------------
-        #
-
-        # Uncomment if using value normalisation.
-        #
-        # normalized_returns = (
-        #     returns
-        #     - self.value_normalizer.mean
-        # ) / (
-        #     self.value_normalizer.std
-        #     + 1e-8
-        # )
-
         normalized_returns = returns
 
+
         self.value_normalizer.update(
-            returns.flatten().cpu().numpy()
+            returns.flatten()
+            .cpu()
+            .numpy()
         )
+
 
         print(
             f"ValueNorm "
@@ -127,11 +143,6 @@ class GraphCTDETrainer(BaseGraphTrainer):
             f"std={self.value_normalizer.std:.3f}"
         )
 
-        #
-        # -------------------------------------------------
-        # Advantage normalisation
-        # -------------------------------------------------
-        #
 
         advantages = (
             advantages
@@ -141,6 +152,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
             + 1e-8
         )
 
+
         print(
             "ADV:",
             f"mean={advantages.mean().item():.4f}",
@@ -149,19 +161,11 @@ class GraphCTDETrainer(BaseGraphTrainer):
             f"max={advantages.max().item():.4f}",
         )
 
-        #
-        # -------------------------------------------------
-        # Storage
-        # -------------------------------------------------
-        #
 
         actor_losses = []
         critic_losses = []
         entropy_losses = []
 
-        #
-        # Diagnostics
-        #
 
         explained_variances = []
 
@@ -174,13 +178,9 @@ class GraphCTDETrainer(BaseGraphTrainer):
         td_error_means = []
         td_error_maxes = []
 
+
         adv_scale = 10.0
 
-        #
-        # -------------------------------------------------
-        # Replay rollout
-        # -------------------------------------------------
-        #
 
         for t, graph_obs in enumerate(
             rollout_batch.observations
@@ -189,6 +189,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
             output = self.policy(
                 graph_obs
             )
+
 
             if t == 0:
 
@@ -203,43 +204,46 @@ class GraphCTDETrainer(BaseGraphTrainer):
                     f"emb_std={emb.std().item():.4f}"
                 )
 
+
                 print(
                     "first_node_emb:",
                     emb[0][:5]
                     .detach()
                     .cpu()
-                    .numpy(),
+                    .numpy()
                 )
 
-            dist = Categorical(
-                logits=output.logits
+
+            # Multi-discrete action branches
+            traffic_logits, sharing_logits = output.logits
+
+
+            dist_traffic = Categorical(
+                logits=traffic_logits
             )
 
-            entropy = dist.entropy().sum()
 
-            probs = torch.softmax(
-                output.logits,
-                dim=-1,
+            dist_sharing = Categorical(
+                logits=sharing_logits
             )
 
-            logit_gap = (
-                output.logits.max(dim=-1).values
-                - output.logits.min(dim=-1).values
-            ).mean()
 
-            max_prob = (
-                probs.max(dim=-1)
-                .values
-                .mean()
+            entropy = (
+                dist_traffic.entropy().sum()
+                +
+                dist_sharing.entropy().sum()
             )
 
-            print(
-                f"entropy={entropy.item():.4f} | "
-                f"logit_gap={logit_gap.item():.4f} | "
-                f"max_prob={max_prob.item():.4f}"
+
+            traffic_actions = (
+                rollout_batch.actions[t][:,0]
             )
 
-            actions = rollout_batch.actions[t]
+
+            sharing_actions = (
+                rollout_batch.actions[t][:,1]
+            )
+
 
             if t == 0:
                 print(
@@ -250,45 +254,56 @@ class GraphCTDETrainer(BaseGraphTrainer):
                     )
                 )
 
-            log_probs = dist.log_prob(
-                actions
+
+            log_probs = (
+                dist_traffic
+                .log_prob(
+                    traffic_actions
+                )
+                +
+                dist_sharing
+                .log_prob(
+                    sharing_actions
+                )
             )
+
 
             actor_loss = -(
                 log_probs
-                * advantages[t].detach()
-                * adv_scale
+                *
+                advantages[t].detach()
+                *
+                adv_scale
             ).sum()
 
+
             entropy_loss = entropy
+
 
             values = (
                 output.value
                 .squeeze(-1)
             )
 
+
             targets = (
                 normalized_returns[t]
                 .detach()
             )
 
+
             critic_loss = F.mse_loss(
                 values,
                 targets,
             )
-
-            #
-            # ------------------------
-            # Critic diagnostics
-            # ------------------------
-            #
-
+            
             with torch.no_grad():
 
                 td_error = (
                     targets
                     - values
                 )
+
 
                 value_means.append(
                     values.mean().item()
@@ -298,6 +313,7 @@ class GraphCTDETrainer(BaseGraphTrainer):
                     values.std().item()
                 )
 
+
                 return_means.append(
                     targets.mean().item()
                 )
@@ -306,36 +322,48 @@ class GraphCTDETrainer(BaseGraphTrainer):
                     targets.std().item()
                 )
 
+
                 td_error_means.append(
-                    td_error.abs().mean().item()
+                    td_error.abs()
+                    .mean()
+                    .item()
                 )
 
                 td_error_maxes.append(
-                    td_error.abs().max().item()
+                    td_error.abs()
+                    .max()
+                    .item()
                 )
+
 
                 var_returns = torch.var(
                     targets
                 )
 
+
                 if var_returns > 1e-8:
 
-                    ev = (
+                    explained_variance = (
                         1.0
-                        - torch.var(
+                        -
+                        torch.var(
                             targets - values
                         )
-                        / var_returns
+                        /
+                        var_returns
                     )
 
+
                     explained_variances.append(
-                        ev.item()
+                        explained_variance.item()
                     )
+
 
             print(
                 f"value={values.mean().item():.3f} "
                 f"target={targets.mean().item():.3f}"
             )
+
 
             actor_losses.append(
                 actor_loss
@@ -349,31 +377,37 @@ class GraphCTDETrainer(BaseGraphTrainer):
                 entropy_loss
             )
 
+
+
         actor_loss = torch.stack(
             actor_losses
         ).mean()
+
 
         critic_loss = torch.stack(
             critic_losses
         ).mean()
 
+
         entropy_loss = torch.stack(
             entropy_losses
         ).mean()
 
+
+
         #
-        # -------------------------------------------------
-        # Critic updates
-        # -------------------------------------------------
+        # Critic update
         #
 
         critic_update_epochs = 5
+
 
         for epoch in range(
             critic_update_epochs
         ):
 
             critic_losses_epoch = []
+
 
             for t, graph_obs in enumerate(
                 rollout_batch.observations
@@ -383,40 +417,56 @@ class GraphCTDETrainer(BaseGraphTrainer):
                     graph_obs
                 )
 
-                values = output.value.squeeze(-1)
+
+                values = (
+                    output.value
+                    .squeeze(-1)
+                )
+
 
                 targets = (
                     normalized_returns[t]
                     .detach()
                 )
 
+
                 critic_loss_t = F.mse_loss(
                     values,
                     targets,
                 )
 
+
                 critic_losses_epoch.append(
                     critic_loss_t
                 )
+
+
 
             critic_loss_epoch = torch.stack(
                 critic_losses_epoch
             ).mean()
 
+
             self.critic_optimizer.zero_grad()
 
+
             critic_loss_epoch.backward()
+
 
             critic_grad = get_grad_norm(
                 self.policy.critic_head.parameters()
             )
+
 
             torch.nn.utils.clip_grad_norm_(
                 self.policy.critic_head.parameters(),
                 max_norm=0.5,
             )
 
+
             self.critic_optimizer.step()
+
+
 
             if epoch == (
                 critic_update_epochs - 1
@@ -427,70 +477,124 @@ class GraphCTDETrainer(BaseGraphTrainer):
                     f"loss={critic_loss_epoch.item():.4f} "
                     f"grad={critic_grad:.4f}"
                 )
+
+
+
         #
-        # -------------------------------------------------
         # Actor update
-        # -------------------------------------------------
         #
+
 
         actor_losses = []
         entropy_losses = []
+
 
         for t, graph_obs in enumerate(
             rollout_batch.observations
         ):
 
+
             output = self.policy(
                 graph_obs
             )
 
-            dist = Categorical(
-                logits=output.logits
+
+            traffic_logits, sharing_logits = output.logits
+
+
+            dist_traffic = Categorical(
+                logits=traffic_logits
             )
 
-            log_probs = dist.log_prob(
-                rollout_batch.actions[t]
+
+            dist_sharing = Categorical(
+                logits=sharing_logits
             )
+
+
+            traffic_actions = (
+                rollout_batch.actions[t][:,0]
+            )
+
+
+            sharing_actions = (
+                rollout_batch.actions[t][:,1]
+            )
+
+
+            log_probs = (
+                dist_traffic
+                .log_prob(
+                    traffic_actions
+                )
+                +
+                dist_sharing
+                .log_prob(
+                    sharing_actions
+                )
+            )
+
 
             actor_loss_t = -(
                 log_probs
-                * advantages[t].detach()
-                * adv_scale
+                *
+                advantages[t].detach()
+                *
+                adv_scale
             ).sum()
+
 
             actor_losses.append(
                 actor_loss_t
             )
 
+
             entropy_losses.append(
-                dist.entropy().sum()
+                dist_traffic.entropy().sum()
+                +
+                dist_sharing.entropy().sum()
             )
+
+
 
         actor_loss = torch.stack(
             actor_losses
         ).mean()
 
+
         entropy_loss = torch.stack(
             entropy_losses
         ).mean()
 
+
+
         actor_objective = (
             actor_loss
-            - self.entropy_coef
-            * entropy_loss
+            -
+            self.entropy_coef
+            *
+            entropy_loss
         )
+
+
 
         self.actor_encoder_optimizer.zero_grad()
 
+
         actor_objective.backward()
+
+
 
         encoder_grad = get_grad_norm(
             self.policy.encoder.parameters()
         )
 
+
         actor_grad = get_grad_norm(
             self.policy.actor_head.parameters()
         )
+
+
 
         print()
 
@@ -506,6 +610,8 @@ class GraphCTDETrainer(BaseGraphTrainer):
             f"critic_grad  : {critic_grad:.4f}"
         )
 
+
+
         if explained_variances:
 
             print(
@@ -513,120 +619,171 @@ class GraphCTDETrainer(BaseGraphTrainer):
                 f"{np.mean(explained_variances):.3f}"
             )
 
+
         print(
             f"Value mean   : "
             f"{np.mean(value_means):.3f}"
         )
+
 
         print(
             f"Value std    : "
             f"{np.mean(value_stds):.3f}"
         )
 
+
         print(
             f"Return mean  : "
             f"{np.mean(return_means):.3f}"
         )
+
 
         print(
             f"Return std   : "
             f"{np.mean(return_stds):.3f}"
         )
 
+
         print(
             f"TD mean      : "
             f"{np.mean(td_error_means):.3f}"
         )
 
+
         print(
             f"TD max       : "
             f"{np.max(td_error_maxes):.3f}"
         )
-
-        print()
-
         torch.nn.utils.clip_grad_norm_(
             list(
                 self.policy.encoder.parameters()
             )
-            + list(
+            +
+            list(
                 self.policy.actor_head.parameters()
             ),
             max_norm=0.5,
         )
 
+
         self.actor_encoder_optimizer.step()
 
+
+
         #
-        # -------------------------------------------------
         # Final losses
-        # -------------------------------------------------
         #
+
 
         total_loss = (
             actor_loss
-            + critic_loss_epoch.detach()
-            - self.entropy_coef * entropy_loss
+            +
+            critic_loss_epoch.detach()
+            -
+            self.entropy_coef
+            *
+            entropy_loss
         )
 
+
+
         result = {
-            "actor_loss": actor_loss.detach().item(),
-            "critic_loss": critic_loss_epoch.detach().item(),
-            "entropy_loss": entropy_loss.detach().item(),
-            "total_loss": total_loss.detach().item(),
+
+            "actor_loss":
+                actor_loss.detach().item(),
+
+            "critic_loss":
+                critic_loss_epoch.detach().item(),
+
+            "entropy_loss":
+                entropy_loss.detach().item(),
+
+            "total_loss":
+                total_loss.detach().item(),
+
 
             #
             # Rollout statistics
             #
-            "rollout_length": len(
-                rollout_batch.observations
-            ),
 
-            "mean_training_reward": (
+            "rollout_length":
+                len(
+                    rollout_batch.observations
+                ),
+
+
+            "mean_training_reward":
                 rollout_batch.rewards
                 .mean()
-                .item()
-            ),
+                .item(),
+
+
 
             #
             # Diagnostics
             #
-            "explained_variance": (
-                float(np.mean(explained_variances))
-                if explained_variances
-                else 0.0
-            ),
 
-            "value_mean": float(
-                np.mean(value_means)
-            ),
+            "explained_variance":
+                (
+                    float(
+                        np.mean(
+                            explained_variances
+                        )
+                    )
+                    if explained_variances
+                    else 0.0
+                ),
 
-            "value_std": float(
-                np.mean(value_stds)
-            ),
 
-            "return_mean": float(
-                np.mean(return_means)
-            ),
+            "value_mean":
+                float(
+                    np.mean(value_means)
+                ),
 
-            "return_std": float(
-                np.mean(return_stds)
-            ),
 
-            "td_error_mean": float(
-                np.mean(td_error_means)
-            ),
+            "value_std":
+                float(
+                    np.mean(value_stds)
+                ),
 
-            "td_error_max": float(
-                np.max(td_error_maxes)
-            ),
 
-            "encoder_grad": encoder_grad,
+            "return_mean":
+                float(
+                    np.mean(return_means)
+                ),
 
-            "actor_grad": actor_grad,
 
-            "critic_grad": critic_grad,
+            "return_std":
+                float(
+                    np.mean(return_stds)
+                ),
+
+
+            "td_error_mean":
+                float(
+                    np.mean(td_error_means)
+                ),
+
+
+            "td_error_max":
+                float(
+                    np.max(td_error_maxes)
+                ),
+
+
+            "encoder_grad":
+                encoder_grad,
+
+
+            "actor_grad":
+                actor_grad,
+
+
+            "critic_grad":
+                critic_grad,
         }
+
+
 
         print()
 
@@ -634,30 +791,36 @@ class GraphCTDETrainer(BaseGraphTrainer):
             "=" * 70
         )
 
+
         print(
             f"Reward      : "
             f"{result['mean_training_reward']:.4f}"
         )
+
 
         print(
             f"Actor Loss  : "
             f"{result['actor_loss']:.4f}"
         )
 
+
         print(
             f"Critic Loss : "
             f"{result['critic_loss']:.4f}"
         )
+
 
         print(
             f"Entropy     : "
             f"{result['entropy_loss']:.4f}"
         )
 
+
         print(
             f"ExplainedVar: "
             f"{result['explained_variance']:.3f}"
         )
+
 
         print(
             f"TD mean/max : "
@@ -666,10 +829,13 @@ class GraphCTDETrainer(BaseGraphTrainer):
             f"{result['td_error_max']:.3f}"
         )
 
+
         print(
             "=" * 70
         )
 
+
         print()
+
 
         return result

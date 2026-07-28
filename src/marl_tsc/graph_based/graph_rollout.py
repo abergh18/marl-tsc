@@ -75,22 +75,19 @@ class GraphRollout:
         # Gifting — detected from first transition
         is_gifting = hasattr(transitions[0], "gifting_log_prob") and \
                      transitions[0].gifting_log_prob is not None
+        
         gifting_actions = [] if is_gifting else None
         gifting_log_probs = [] if is_gifting else None
         gifting_stats = [] if is_gifting else None
 
         for transition in transitions:
-
             observations.append(transition.observation)
 
+            # We retain the logic to pass the entire action dict so that 
+            # multi-discrete actions are preserved for the trainer
             actions.append(
                 [
-                    # ZeroSumRewardWrapper actions are [traffic, gifting]
-                    # Standard actions are plain ints.
-                    # Extract traffic action (index 0) for the rollout.
-                    transition.action_dict[agent][0]
-                    if isinstance(transition.action_dict[agent], list)
-                    else transition.action_dict[agent]
+                    transition.action_dict[agent]
                     for agent in agent_ids
                 ]
             )
@@ -107,15 +104,19 @@ class GraphRollout:
             values.append(transition.value)
             dones.append(float(transition.done))
 
+            # Safely capture the group's tracking metrics if they exist
             if is_gifting:
-                gifting_actions.append(
-                    [
-                        transition.gifting_action_dict[agent]
-                        for agent in agent_ids
-                    ]
-                )
+                if hasattr(transition, "gifting_action_dict"):
+                    gifting_actions.append(
+                        [
+                            transition.gifting_action_dict[agent]
+                            for agent in agent_ids
+                        ]
+                    )
                 gifting_log_probs.append(transition.gifting_log_prob)
-                gifting_stats.append(transition.gifting_stats)
+                
+                if hasattr(transition, "gifting_stats"):
+                    gifting_stats.append(transition.gifting_stats)
 
         return RolloutBatch(
             observations=observations,
@@ -137,7 +138,7 @@ class GraphRollout:
             gifting_actions=torch.tensor(
                 gifting_actions,
                 dtype=torch.long,
-            ) if is_gifting else None,
+            ) if (is_gifting and len(gifting_actions) > 0) else None,
             gifting_log_probs=torch.stack(
                 gifting_log_probs
             ) if is_gifting else None,

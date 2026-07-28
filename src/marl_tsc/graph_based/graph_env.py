@@ -1,5 +1,3 @@
-# graph_env.py
-
 from __future__ import annotations
 
 import numpy as np
@@ -33,7 +31,7 @@ class GraphTrafficEnv:
         config_file,
         network_file,
         possible_agents,
-        sumo_env=None,      # <-- ADD: accept pre-wrapped env
+        sumo_env=None,
         **env_kwargs,
     ):
         if sumo_env is not None:
@@ -63,7 +61,7 @@ class GraphTrafficEnv:
             dtype=torch.float32,
         )                                       # (num_agents, obs_dim)
 
-        global_state = x.flatten()             # (num_agents * obs_dim,)
+        global_state = x.flatten()              # (num_agents * obs_dim,)
 
         return GraphObservation(
             graph=Data(
@@ -127,4 +125,4 @@ class GraphTrafficEnv:
     @property
     def global_state_dim(self):
         """Dimension of the centralised global state vector."""
-        return len(self.agent_ids) * self.obs_dim
+        return self.obs_dim * len(self.agent_ids)

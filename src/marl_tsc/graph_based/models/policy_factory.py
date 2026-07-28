@@ -20,32 +20,22 @@ a policy with a single function call.
 """
 
 from __future__ import annotations
+from typing import Union
 
-from marl_tsc.graph_based.encoders.gat_encoder import (
-    GATEncoder,
-)
-
-from marl_tsc.graph_based.models.actor import (
-    ActorHead,
-)
-
-from marl_tsc.graph_based.models.critic import (
-    CriticHead,
-)
-
-from marl_tsc.graph_based.models.graph_policy import (
-    GraphPolicy,
-)
-
+from marl_tsc.graph_based.encoders.gat_encoder import GATEncoder
+from marl_tsc.graph_based.models.actor import ActorHead
+from marl_tsc.graph_based.models.critic import CriticHead
+from marl_tsc.graph_based.models.graph_policy import GraphPolicy
 from marl_tsc.graph_based.models.true_mappo_policy import (
     CentralisedCritic,
     GraphMAPPOPolicy,
 )
 
+
 def build_default_graph_policy(
-    obs_dim,
-    action_dim,
-    hidden_dim=64,
+    obs_dim: int,
+    action_dims: Union[int, list[int]],
+    hidden_dim: int = 64,
 ):
     encoder = GATEncoder(
         obs_dim=obs_dim,
@@ -54,7 +44,7 @@ def build_default_graph_policy(
 
     actor_head = ActorHead(
         embedding_dim=hidden_dim,
-        action_dim=action_dim,
+        action_dims=action_dims,
     )
 
     critic_head = CriticHead(
@@ -67,9 +57,10 @@ def build_default_graph_policy(
         critic_head=critic_head,
     )
 
+
 def build_default_graph_mappo_policy(
     obs_dim: int,
-    action_dim: int,
+    action_dims: Union[int, list[int]],
     global_state_dim: int,
     hidden_dim: int = 64,
     critic_hidden_dim: int = 128,
@@ -85,8 +76,9 @@ def build_default_graph_mappo_policy(
     ----------
     obs_dim : int
         Per-agent observation dimension.
-    action_dim : int
-        Number of discrete actions per agent.
+    action_dims : int or list[int]
+        Number of discrete actions per agent, or a list of dimensions
+        for multi-discrete environments.
     global_state_dim : int
         Dimension of the global state vector (num_agents * obs_dim).
         Obtained from env.global_state_dim.
@@ -100,12 +92,6 @@ def build_default_graph_mappo_policy(
     -------
     GraphMAPPOPolicy
     """
-    # Reuse the same encoder and actor_head constructors as the existing
-    # build_default_graph_policy — copy those lines here verbatim so this
-    # function is self-contained and doesn't depend on the other builder.
-    from marl_tsc.graph_based.encoders.gat_encoder import GATEncoder
-    from marl_tsc.graph_based.models.actor import ActorHead
-
     encoder = GATEncoder(
         obs_dim=obs_dim,
         hidden_dim=hidden_dim,
@@ -113,7 +99,7 @@ def build_default_graph_mappo_policy(
 
     actor_head = ActorHead(
         embedding_dim=hidden_dim,
-        action_dim=action_dim,
+        action_dims=action_dims,
     )
 
     centralised_critic = CentralisedCritic(
@@ -126,5 +112,3 @@ def build_default_graph_mappo_policy(
         actor_head=actor_head,
         centralised_critic=centralised_critic,
     )
-
-

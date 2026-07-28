@@ -3,7 +3,7 @@ wrappers.py
 
 Contains custom PettingZoo wrappers for the MARL traffic signal control environment.
 These wrappers modify action spaces, enforce real-world traffic constraints, 
-and implement peer-rewarding mechanics.
+and implement peer-rewarding and zero-sum gifting mechanics.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         self.action_spaces = {
             agent: MultiDiscrete([
                 env.action_space(agent).n,
-                division + 1
+                division + 1,
             ])
             for agent in self.possible_agents
         }
@@ -111,16 +111,12 @@ class PeerRewardingWrapper(BaseParallelWrapper):
 
         # 3. Calculate Public Goods Game contributions
         for agent in self.agents:
-            # share_percentage is between 0.0 and 1.0
             share_percentage = sharing_actions[agent] * self.portion_size
             
-            # Scaled down to prevent the "infinite money glitch"
             personal_cost = share_percentage * 0.01
             community_contribution = personal_cost * 2.0
             
             sharing_pool += community_contribution
-            
-            # The agent MUST keep its original traffic penalty, minus the cost of sharing
             final_rewards[agent] = rewards[agent] - personal_cost
 
         # 4. Distribute the pooled community rewards equally
@@ -129,7 +125,6 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         for agent in self.agents:
             final_rewards[agent] += payout_per_agent
             
-            # Sneak the original traffic penalty into infos for apples-to-apples evaluation
             if "raw_traffic_reward" not in infos[agent]:
                 infos[agent]["raw_traffic_reward"] = rewards[agent]
 
@@ -141,13 +136,13 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         for agent, info in infos.items():
             if "action_mask" in info:
                 traffic_mask = info["action_mask"]
-                # All sharing actions (0% to 100%) are always legal
                 sharing_mask = np.ones(self.division + 1, dtype=np.float32)
                 
                 info["action_mask"] = np.concatenate(
                     [traffic_mask, sharing_mask]
                 )
         return infos
+
 
 # ── Zero-sum gifting ──────────────────────────────────────────────────────────
 
@@ -194,21 +189,6 @@ class ZeroSumCalculator:
     ) -> dict[str, float]:
         """
         Apply zero-sum redistribution to a single timestep's rewards.
-
-        Parameters
-        ----------
-        rewards : dict[str, float]
-            Raw per-agent rewards from env.step().
-        gifting_actions : dict[str, int]
-            Discrete gifting action per agent (0..num_divisions).
-            Action k means gift k/num_divisions of abs(reward) to peers.
-        agent_ids : list[str]
-            Ordered list of agent IDs.
-
-        Returns
-        -------
-        dict[str, float]
-            Redistributed rewards. Sum equals sum of input rewards.
         """
         num_agents = len(agent_ids)
 
@@ -247,13 +227,6 @@ class ZeroSumCalculator:
     ) -> dict[str, float]:
         """
         Compute gifting statistics for logging.
-
-        Returns
-        -------
-        dict with keys:
-            mean_gift_fraction  — average fraction of reward gifted
-            gift_rate           — fraction of agents who gifted non-zero
-            mean_gift_amount    — average absolute reward transferred
         """
         fractions = [
             gifting_actions[agent] * self.portion_size
@@ -278,21 +251,6 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
     After each environment step, rewards are redistributed using the
     zero-sum mechanic: whatever an agent gives, it loses; gifts are
     split equally among all other agents.
-
-    Gifting stats (mean_gift_fraction, gift_rate, mean_gift_amount)
-    and raw_traffic_reward are stored in infos at each step for
-    downstream logging and evaluation comparison.
-
-    Wrapper interface inspired by the PeerRewardingWrapper implementation
-    by a project collaborator.
-
-    Parameters
-    ----------
-    env : ParallelEnv
-        Underlying PettingZoo environment.
-    division : int, optional
-        Number of discrete gifting portions. Defaults to num_agents - 1
-        for clean equal-split granularity, but can be set independently.
     """
 
     def __init__(self, env, division: int | None = None):
@@ -334,7 +292,7 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
         agent_ids = list(self.agents)
 
         if not agent_ids:
-          return obs, {}, terms, truncs, infos
+            return obs, {}, terms, truncs, infos
 
         # 3. Apply zero-sum redistribution
         redistributed = self.calculator.redistribute(

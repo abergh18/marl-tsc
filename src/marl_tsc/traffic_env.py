@@ -25,12 +25,12 @@ class SumoTrafficEnv(ParallelEnv):
         seconds_per_action: int = 5,
         max_lanes_per_tls: int | None = None,
         green_phase_count: int | None = None,
-        max_queue_value: float = 20.0,
-        min_green_seconds: int = 10,
+        max_queue_value: float = 100.0,
+        min_green_seconds: int = 5,
         max_green_seconds: int = 60,
         max_red_seconds: int = 60,
         yellow_seconds: int = 3,
-        switch_penalty: float = 0.1,
+        switch_penalty: float = 0.01,
         phase_action_mode: str = "direct",
         seed: int = 42,
         render_mode: str | None = None,
@@ -88,6 +88,7 @@ class SumoTrafficEnv(ParallelEnv):
         self._phase_red_seconds: dict[str, list[float]] = {}
         self._switched_last_step: dict[str, bool] = {}
         self._latest_lane_queues: dict[str, list[int]] = {}
+        self._prev_waiting_time: dict[str, float] = {}
         self._latest_max_waiting_times: dict[str, float] = {}
         self._previous_mean_local_queue: dict[str, float] = {}
         self._last_arrived_vehicles = 0
@@ -255,6 +256,7 @@ class SumoTrafficEnv(ParallelEnv):
         self._last_mean_waiting_time = 0.0
         self._last_total_time_loss = 0.0
         self._last_vehicle_count = 0
+        self._prev_waiting_time = {agent: 0.0 for agent in selected_agents}
 
         for tls_id in selected_agents:
             controlled_links_lanes = list(traci.trafficlight.getControlledLanes(tls_id))
@@ -444,21 +446,34 @@ class SumoTrafficEnv(ParallelEnv):
         return local_queue, mean_local_queue, max_local_queue
 
     def _reward_for_agent(self, agent: str) -> float:
-        """Computes the reward for an agent based on local traffic metrics.
-
-        The dominant term is the current mean queue, which directly matches the
-        main evaluation objective.  A small queue-reduction bonus improves
-        credit assignment without allowing a single vehicle's cumulative wait
-        to make rewards grow more negative merely because an episode is older.
+        """Computes the reward for an agent based on waiting times.
+        
+        Blends the reduction in waiting time (delta) with an absolute 
+        penalty for current waiting time, encouraging the agent to clear 
+        queues while penalising prolonged waits.
         """
-        _, mean_local_queue, _ = self._local_queue_stats(agent)
-        previous_queue = self._previous_mean_local_queue.get(agent, mean_local_queue)
-        queue_improvement = previous_queue - mean_local_queue
+        traci = self._import_traci()
+        lanes = self._tls_to_lanes.get(agent, [])
+        lane_ids = lanes[:self.max_lanes_per_tls]
+    
+        current_waiting = float(sum(
+            traci.lane.getWaitingTime(lane_id)
+            for lane_id in lane_ids
+        ))
+    
+        prev_waiting = self._prev_waiting_time.get(agent, current_waiting)
+        delta = prev_waiting - current_waiting
+    
+        self._prev_waiting_time[agent] = current_waiting
+    
         switched = self._switched_last_step.get(agent, False)
-        switch_cost = self.switch_penalty if switched else 0.0
-        bounded_improvement = float(np.clip(queue_improvement, -5.0, 5.0))
-        bounded_queue = min(mean_local_queue, self.max_queue_value)
-        return 0.25 * bounded_improvement - bounded_queue - switch_cost
+        penalty = self.switch_penalty if switched else 0.0
+    
+        # Blend: 70% delta signal + 30% absolute penalty
+        delta_reward = delta / 10.0
+        abs_reward = -current_waiting / 100.0
+        
+        return (0.7 * delta_reward + 0.3 * abs_reward) - penalty
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
