@@ -237,16 +237,21 @@ class SimulationGenerator:
 
         return self.routes_file
 
-    def generate_peak_trips(self, peak_end: int = 1800, peak_period: float = 1.0, offpeak_period: float = 3.0) -> Path:
+    def generate_peak_trips(self, peak_end: int = 1800, peak_period: float | None = None, offpeak_period: float | None = None) -> Path:
         """Generate realistic peak/off-peak demand pattern."""
-
+        # Default to self.trip_period if not specified
+        if peak_period is None:
+            peak_period = self.trip_period
+        if offpeak_period is None:
+            offpeak_period = self.trip_period * 3.0
+    
         # Discover traffic light IDs if not already initialised
         if self.traffic_light_ids is None:
             self.traffic_light_ids = self.discover_traffic_light_ids()
-
+    
         peak_trips = self.output_dir / "peak.trips.xml"
         offpeak_trips = self.output_dir / "offpeak.trips.xml"
-
+    
         base_args = [
             sys.executable, str(self.random_trips_file),
             "-n", str(self.network_file),
@@ -257,13 +262,13 @@ class SimulationGenerator:
             "--random-depart",
             "--seed", str(self.seed),
         ]
-        
+    
         if self.min_distance is not None:
             base_args.extend(["--min-distance", str(self.min_distance)])
-            
+    
         if self.vtypes_file is not None:
             base_args.extend(["--additional-files", str(self.vtypes_file)])
-
+    
         # Peak trips
         subprocess.run(base_args + [
             "-o", str(peak_trips),
@@ -272,7 +277,7 @@ class SimulationGenerator:
             "--period", str(peak_period),
             "--prefix", "peak_",
         ], check=True)
-
+    
         # Off-peak trips
         subprocess.run(base_args + [
             "-o", str(offpeak_trips),
@@ -281,7 +286,7 @@ class SimulationGenerator:
             "--period", str(offpeak_period),
             "--prefix", "offpeak_",
         ], check=True)
-
+    
         # Merge with duarouter
         subprocess.run([
             "duarouter",
@@ -292,7 +297,7 @@ class SimulationGenerator:
             "--seed", str(self.seed),
             "--no-step-log",
         ], check=True)
-
+    
         return self.routes_file
 
     def generate_config(self) -> Path:
