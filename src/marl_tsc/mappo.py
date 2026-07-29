@@ -335,7 +335,7 @@ def train_mappo(
     global_steps = 0
     episode_index = 0
 
-    episode_returns: deque = deque(maxlen=100)
+    episode_returns: deque = deque(maxlen=50)
     current_episode_return = 0.0
 
     while global_steps < total_timesteps:
