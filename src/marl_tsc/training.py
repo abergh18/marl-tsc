@@ -135,7 +135,8 @@ def train_ppo(
     model_path = output_dir / f"{algorithm}_sumo_traffic"
 
     try:
-        model.learn(total_timesteps=total_timesteps, callback=reward_logger)
+        ppo_timesteps = total_timesteps * len(traffic_light_ids) # PPO treats each individual agent descision as a timestep
+        model.learn(total_timesteps=ppo_timesteps, callback=reward_logger)
         output_dir.mkdir(parents=True, exist_ok=True)
         model.save(model_path)
     finally:
