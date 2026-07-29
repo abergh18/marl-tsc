@@ -257,8 +257,8 @@ def train_mappo(
                 nn.LayerNorm(hidden_size),
                 nn.ReLU(),
             )
-            nn.init.zeros_(self.base[-1].weight)
-            nn.init.zeros_(self.base[-1].bias)
+            nn.init.zeros_(self.base[-2].weight)
+            nn.init.zeros_(self.base[-2].bias)
 
             self.branches = nn.ModuleList([
                 nn.Linear(hidden_size, dim) for dim in action_dims
