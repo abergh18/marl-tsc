@@ -267,14 +267,15 @@ def train_mappo(
         def forward(self, obs: torch.Tensor) -> list[torch.Tensor]:
             x = self.base(obs)
             logits = [branch(x) for branch in self.branches]
-
+        
             if self.phase_queue_start is not None:
                 traffic_dim = self.action_dims[0]
-                phase_queues = obs[
-                    ..., self.phase_queue_start : self.phase_queue_start + traffic_dim
-                ]
-                logits[0] = logits[0] + self.queue_logit_scale.clamp(0.0, 5.0) * phase_queues
-
+                end_idx = self.phase_queue_start + traffic_dim
+                if end_idx <= obs.shape[-1]:
+                    phase_queues = obs[..., self.phase_queue_start:end_idx]
+                    if phase_queues.shape[-1] == logits[0].shape[-1]:
+                        logits[0] = logits[0] + self.queue_logit_scale.clamp(0.0, 5.0) * phase_queues
+        
             return logits
 
     class Critic(nn.Module):
