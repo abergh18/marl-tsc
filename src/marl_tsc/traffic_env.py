@@ -103,24 +103,33 @@ class SumoTrafficEnv(ParallelEnv):
             self._probe_network_structure()
 
     def _import_traci(self):
-        if self._traci is not None:
+            if self._traci is not None:
+                return self._traci
+    
+            sumo_home = os.environ.get("SUMO_HOME")
+            if not sumo_home:
+                raise EnvironmentError(
+                    "SUMO_HOME is not set. Install SUMO and set SUMO_HOME before running the environment."
+                )
+    
+            tools_path = Path(sumo_home) / "tools"
+            if str(tools_path) not in sys.path:
+                sys.path.append(str(tools_path))
+    
+            # Check if libsumo has been explicitly requested
+            use_libsumo = os.environ.get("USE_LIBSUMO", "0") == "1"
+    
+            if use_libsumo:
+                try:
+                    import libsumo as traci  # type: ignore
+                except ImportError:
+                    import traci  # type: ignore
+            else:
+                import traci  # type: ignore
+    
+            self._traci = traci
             return self._traci
-
-        sumo_home = os.environ.get("SUMO_HOME")
-        if not sumo_home:
-            raise EnvironmentError(
-                "SUMO_HOME is not set. Install SUMO and set SUMO_HOME before running the environment."
-            )
-
-        tools_path = Path(sumo_home) / "tools"
-        if str(tools_path) not in sys.path:
-            sys.path.append(str(tools_path))
-
-        import traci  # type: ignore
-
-        self._traci = traci
-        return self._traci
-
+        
     def _sumo_binary(self) -> str:
         return "sumo-gui" if self.render_mode == "human" else "sumo"
 
