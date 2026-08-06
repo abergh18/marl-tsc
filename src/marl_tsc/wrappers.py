@@ -212,19 +212,35 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         
     def _discover_neighbours(self, config_file: Path, valid_agents: list[str]) -> dict[str, list[str]]:
         """Parses the SUMO network to find adjacent traffic lights."""
+        import xml.etree.ElementTree as ET
+        
         neighbours = {agent: set() for agent in valid_agents}
         
         try:
-            config_text = config_file.read_text(encoding="utf-8")
-            match = re.search(r'<net-file\s+value="([^"]+)"', config_text)
-            if not match:
-                print("Warning: Could not find net-file in sumocfg. Defaulting to all-to-all gifting.")
-                return {a: [other for other in valid_agents if other != a] for a in valid_agents}
-                
-            net_file = config_file.parent / match.group(1)
-            net = sumolib.net.readNet(str(net_file))
+            config_path = Path(config_file)
+            net_file_path = None
             
-            # Iterate through all edges (streets) in the network
+            # Step 1: Safely parse the XML structure of the config file
+            try:
+                tree = ET.parse(config_path)
+                for element in tree.iter("net-file"):
+                    if "value" in element.attrib:
+                        net_file_path = config_path.parent / element.attrib["value"]
+                        break
+            except Exception:
+                pass
+                
+            # Step 2: Fallback - if we couldn't read the config, just find the .net.xml file in the folder
+            if net_file_path is None or not net_file_path.exists():
+                net_files = list(config_path.parent.glob("*.net.xml"))
+                if not net_files:
+                    raise FileNotFoundError("Could not find a .net.xml file in the simulation directory.")
+                net_file_path = net_files[0]
+                
+            print(f"Reading network topology from: {net_file_path}")
+            net = sumolib.net.readNet(str(net_file_path))
+            
+            # Step 3: Trace the roads to find connected traffic lights
             for edge in net.getEdges():
                 from_node = edge.getFromNode()
                 to_node = edge.getToNode()
@@ -232,7 +248,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
                 from_tls = from_node.getTLS()
                 to_tls = to_node.getTLS()
                 
-                # If both ends of the street have a traffic light, they are neighbours
+                # If a road connects two traffic lights, they are neighbours
                 if from_tls and to_tls:
                     from_id = from_tls.getID()
                     to_id = to_tls.getID()
@@ -246,7 +262,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         except Exception as e:
             print(f"Warning: Failed to parse neighbours ({e}). Defaulting to all-to-all gifting.")
             return {a: [other for other in valid_agents if other != a] for a in valid_agents}
-
+            
     def action_space(self, agent):
         return self.action_spaces[agent]
 
