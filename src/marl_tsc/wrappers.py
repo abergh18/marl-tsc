@@ -153,7 +153,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
 
 class ZeroSumCalculator:
     """
-    Zero-sum reward redistribution logic restricted to local neighbors.
+    Zero-sum reward redistribution logic restricted to local neighbours.
 
     Stateless class containing the zero-sum maths so ZeroSumRewardWrapper
     stays clean and the redistribution logic is testable independently
@@ -169,10 +169,10 @@ class ZeroSumCalculator:
         rewards: dict[str, float],
         gifting_actions: dict[str, int],
         agent_ids: list[str],
-        neighbors: dict[str, list[str]],
+        neighbours: dict[str, list[str]],
     ) -> dict[str, float]:
         """
-        Apply zero-sum redistribution only among neighboring agents.
+        Apply zero-sum redistribution only among neighbouring agents.
         """
         num_agents = len(agent_ids)
 
@@ -185,26 +185,41 @@ class ZeroSumCalculator:
             for agent in agent_ids
         }
 
-        # Distribute each agent's gift equally among its active neighbors
+        # Distribute each agent's gift equally among its active neighbours
         shares = {agent: 0.0 for agent in agent_ids}
         for agent in agent_ids:
-            agent_neighbors = neighbors.get(agent, [])
+            agent_neighbours = neighbours.get(agent, [])
             
-            # Ensure we only share with neighbors currently active in the environment
-            active_neighbors = [n for n in agent_neighbors if n in agent_ids]
+            # Ensure we only share with neighbours currently active in the environment
+            active_neighbours = [n for n in agent_neighbours if n in agent_ids]
             
-            if active_neighbors:
-                share_per_neighbor = gifts[agent] / len(active_neighbors)
-                for neighbor in active_neighbors:
-                    shares[neighbor] += share_per_neighbor
+            if active_neighbours:
+                share_per_neighbour = gifts[agent] / len(active_neighbours)
+                for neighbour in active_neighbours:
+                    shares[neighbour] += share_per_neighbour
             else:
-                # If an agent tries to share but has no active neighbors, refund the gift
+                # If an agent tries to share but has no active neighbours, refund the gift
                 shares[agent] += gifts[agent]
 
-        # Agent loses its given gift, but gains shares from its incoming neighbors
+        # Agent loses its given gift, but gains shares from its incoming neighbours
         redistributed = {}
         for agent in agent_ids:
             redistributed[agent] = rewards[agent] - gifts[agent] + shares[agent]
+
+        # --- Temporary Debug Print to verify neighbour gifting ---
+        # Uncomment this if you want to see the exact transactions in the console
+        if sum(gifts.values()) > 0:
+            print("\n--- Neighbour Gifting Step ---")
+            for agent in agent_ids:
+                if gifts[agent] > 0 or shares[agent] > 0:
+                    net_effect = shares[agent] - gifts[agent]
+                    print(
+                        f"{agent} | "
+                        f"Gave: {gifts[agent]:.2f} | "
+                        f"Received: {shares[agent]:.2f} | "
+                        f"Net: {net_effect:.2f}"
+                    )
+            print("------------------------------\n")
 
         return redistributed
 
@@ -225,6 +240,15 @@ class ZeroSumCalculator:
             gifting_actions[agent] * self.portion_size * abs(rewards[agent])
             for agent in agent_ids
         ]
+        
+        # Prevent division by zero if agent_ids is empty
+        if not fractions:
+            return {
+                "mean_gift_fraction": 0.0,
+                "gift_rate": 0.0,
+                "mean_gift_amount": 0.0,
+            }
+            
         return {
             "mean_gift_fraction": float(sum(fractions) / len(fractions)),
             "gift_rate": float(sum(1 for f in fractions if f > 0) / len(fractions)),
@@ -234,12 +258,12 @@ class ZeroSumCalculator:
 
 class ZeroSumRewardWrapper(BaseParallelWrapper):
     """
-    PettingZoo wrapper implementing zero-sum peer reward sharing among neighbors.
+    PettingZoo wrapper implementing zero-sum peer reward sharing among neighbours.
 
     Extends the action space with a discrete gifting action per agent.
     After each environment step, rewards are redistributed using the
     zero-sum mechanic: whatever an agent gives, it loses; gifts are
-    split equally among its connected neighbors.
+    split equally among its connected neighbours.
     """
 
     def __init__(self, env, division: int | None = None):
@@ -250,8 +274,11 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
         self.division = division if division is not None else max(1, num_agents - 1)
         self.calculator = ZeroSumCalculator(num_divisions=self.division)
 
-        # Automatically trace the SUMO network to find connected neighbors
-        self.neighbors = self._discover_neighbors(env.unwrapped.config_file, self.possible_agents)
+        # Automatically trace the SUMO network to find connected neighbours
+        self.neighbours = self._discover_neighbours(env.unwrapped.config_file, self.possible_agents)
+        
+        # Print to console so you can verify the topology is correct
+        print("Discovered Network Neighbours:", self.neighbours)
 
         # Extend action space: [Traffic Phase, Gifting Fraction]
         self.action_spaces = {
@@ -262,9 +289,9 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
             for agent in self.possible_agents
         }
         
-    def _discover_neighbors(self, config_file: Path, valid_agents: list[str]) -> dict[str, list[str]]:
+    def _discover_neighbours(self, config_file: Path, valid_agents: list[str]) -> dict[str, list[str]]:
         """Parses the SUMO network to find adjacent traffic lights."""
-        neighbors = {agent: set() for agent in valid_agents}
+        neighbours = {agent: set() for agent in valid_agents}
         
         try:
             config_text = config_file.read_text(encoding="utf-8")
@@ -284,19 +311,19 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
                 from_tls = from_node.getTLS()
                 to_tls = to_node.getTLS()
                 
-                # If both ends of the street have a traffic light, they are neighbors
+                # If both ends of the street have a traffic light, they are neighbours
                 if from_tls and to_tls:
                     from_id = from_tls.getID()
                     to_id = to_tls.getID()
                     
                     if from_id in valid_agents and to_id in valid_agents and from_id != to_id:
-                        neighbors[from_id].add(to_id)
-                        neighbors[to_id].add(from_id)
+                        neighbours[from_id].add(to_id)
+                        neighbours[to_id].add(from_id)
                         
-            return {agent: list(agent_neighbors) for agent, agent_neighbors in neighbors.items()}
+            return {agent: list(agent_neighbours) for agent, agent_neighbours in neighbours.items()}
             
         except Exception as e:
-            print(f"Warning: Failed to parse neighbors ({e}). Defaulting to all-to-all gifting.")
+            print(f"Warning: Failed to parse neighbours ({e}). Defaulting to all-to-all gifting.")
             return {a: [other for other in valid_agents if other != a] for a in valid_agents}
 
     def action_space(self, agent):
@@ -324,12 +351,12 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
         if not agent_ids:
             return obs, {}, terms, truncs, infos
 
-        # 3. Apply neighbor-restricted zero-sum redistribution
+        # 3. Apply neighbour-restricted zero-sum redistribution
         redistributed = self.calculator.redistribute(
             rewards=rewards,
             gifting_actions=gifting_actions,
             agent_ids=agent_ids,
-            neighbors=self.neighbors,
+            neighbours=self.neighbours,
         )
 
         # 4. Compute gifting stats for logging
