@@ -463,28 +463,21 @@ class SumoTrafficEnv(ParallelEnv):
         """
         traci = self._import_traci()
         
-        # Check all incoming lanes without slicing, ensuring full visibility
         lanes = self._tls_to_lanes.get(agent, [])
         
         total_penalty = 0.0
         
-        # 1. Square the halted vehicles to penalise long wait times heavily
         for lane_id in lanes:
             halted = traci.lane.getLastStepHaltingNumber(lane_id)
             
             total_penalty += float(halted ** 2)
             
-        # 2. Apply the switch penalty to prevent light flickering
         switched = self._switched_last_step.get(agent, False)
         switch_penalty = self.switch_penalty if switched else 0.0
         
-        # 3. Invert the reward to stop the zero-sum cartel exploit.
-        # Start with a positive baseline score and subtract the penalties.
         baseline_score = 100.0
         reward = baseline_score - total_penalty - switch_penalty
         
-        # 4. Cap the reward at 0.0 so negative numbers cannot be exploited
-        # by the absolute value abs() function in the gifting wrapper.
         return max(0.0, reward)
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
