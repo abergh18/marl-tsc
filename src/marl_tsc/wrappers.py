@@ -8,7 +8,6 @@ and implement peer-rewarding and zero-sum gifting mechanics.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import numpy as np
@@ -144,8 +143,6 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         super().__init__(env)
 
         self.possible_agents = list(env.possible_agents)
-        num_agents = len(self.possible_agents)
-        
         self.division = division if division is not None else 10
         self.calculator = ZeroSumCalculator(num_divisions=self.division)
 
@@ -166,7 +163,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         }
         
     def _discover_neighbours(self, config_file: Path, valid_agents: list[str]) -> dict[str, list[str]]:
-        """Parses the SUMO network to find adjacent traffic lights."""
+        """Parses the SUMO network using BFS to find adjacent traffic lights."""
         import xml.etree.ElementTree as ET
         
         neighbours = {agent: set() for agent in valid_agents}
@@ -192,34 +189,42 @@ class PeerRewardingWrapper(BaseParallelWrapper):
                 
             net = sumolib.net.readNet(str(net_file_path))
             
-            # --- THE FIX: Map Nodes to their Traffic Lights safely ---
-            node_to_tls = {}
-            for tls in net.getTrafficLights():
-                tls_id = tls.getID()
-                if tls_id in valid_agents:
-                    if hasattr(tls, "getNodes"):
-                        for node in tls.getNodes():
-                            node_to_tls[node.getID()] = tls_id
-                    else:
-                        node_to_tls[tls_id] = tls_id
-
-            # Fallback for exact ID matching if sumolib versions differ
-            for agent in valid_agents:
-                if agent not in node_to_tls:
-                    node_to_tls[agent] = agent
+            # Search outwards from each traffic light node to find connected valid agents
+            max_depth = 15  # Prevents scanning the entire city for isolated agents
             
-            # Trace the roads to find connected traffic lights
-            for edge in net.getEdges():
-                from_node_id = edge.getFromNode().getID()
-                to_node_id = edge.getToNode().getID()
+            for agent in valid_agents:
+                try:
+                    start_node = net.getNode(agent)
+                except KeyError:
+                    # If the agent ID somehow doesn't map to a junction, skip it
+                    continue
+                    
+                visited = {start_node.getID()}
+                queue = [(start_node, 0)]
                 
-                from_tls = node_to_tls.get(from_node_id)
-                to_tls = node_to_tls.get(to_node_id)
-                
-                if from_tls and to_tls and from_tls != to_tls:
-                    neighbours[from_tls].add(to_tls)
-                    neighbours[to_tls].add(from_tls)
+                while queue:
+                    current_node, depth = queue.pop(0)
+                    
+                    if depth >= max_depth:
+                        continue
                         
+                    for edge in current_node.getOutgoing():
+                        next_node = edge.getToNode()
+                        next_id = next_node.getID()
+                        
+                        if next_id in visited:
+                            continue
+                            
+                        visited.add(next_id)
+                        
+                        if next_id in valid_agents and next_id != agent:
+                            # We found another traffic light! Log it and stop searching this path.
+                            neighbours[agent].add(next_id)
+                            neighbours[next_id].add(agent)
+                        else:
+                            # It's a regular geometry node, keep tracing down the road.
+                            queue.append((next_node, depth + 1))
+                            
             return {agent: list(agent_neighbours) for agent, agent_neighbours in neighbours.items()}
             
         except Exception as e:
