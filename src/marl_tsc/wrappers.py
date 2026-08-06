@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import sumolib
 from gymnasium.spaces import MultiDiscrete
 from pettingzoo.utils.wrappers import BaseParallelWrapper
 
@@ -163,7 +162,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         }
         
     def _discover_neighbours(self, config_file: Path, valid_agents: list[str]) -> dict[str, list[str]]:
-        """Parses the SUMO network using BFS to find adjacent traffic lights."""
+        """Parses the SUMO network directly via XML to find adjacent traffic lights."""
         import xml.etree.ElementTree as ET
         
         neighbours = {agent: set() for agent in valid_agents}
@@ -187,20 +186,53 @@ class PeerRewardingWrapper(BaseParallelWrapper):
                     raise FileNotFoundError("Could not find a .net.xml file.")
                 net_file_path = net_files[0]
                 
-            net = sumolib.net.readNet(str(net_file_path))
+            # Parse the .net.xml directly to avoid sumolib node mapping errors
+            net_tree = ET.parse(net_file_path)
+            net_root = net_tree.getroot()
             
-            # Search outwards from each traffic light node to find connected valid agents
-            max_depth = 15  # Prevents scanning the entire city for isolated agents
+            node_to_tls = {}
+            tls_to_nodes = {agent: [] for agent in valid_agents}
+            
+            # 1. Map physical junctions to traffic light program IDs
+            for junction in net_root.findall("junction"):
+                j_id = junction.get("id")
+                tl_id = junction.get("tl")
+                
+                if tl_id in valid_agents and j_id:
+                    node_to_tls[j_id] = tl_id
+                    tls_to_nodes[tl_id].append(j_id)
+                    
+            # Fallback if IDs perfectly match
+            for agent in valid_agents:
+                if not tls_to_nodes[agent]:
+                    node_to_tls[agent] = agent
+                    tls_to_nodes[agent].append(agent)
+            
+            # 2. Map all road connections (edges)
+            node_adj = {}
+            for edge in net_root.findall("edge"):
+                from_n = edge.get("from")
+                to_n = edge.get("to")
+                
+                if from_n and to_n:
+                    if from_n not in node_adj:
+                        node_adj[from_n] = []
+                    node_adj[from_n].append(to_n)
+                    
+                    if to_n not in node_adj:
+                        node_adj[to_n] = []
+                    node_adj[to_n].append(from_n)
+                    
+            # 3. Use BFS to trace physical roads between traffic lights
+            max_depth = 15
             
             for agent in valid_agents:
-                try:
-                    start_node = net.getNode(agent)
-                except KeyError:
-                    # If the agent ID somehow doesn't map to a junction, skip it
+                start_nodes = tls_to_nodes.get(agent, [])
+                if not start_nodes:
                     continue
                     
-                visited = {start_node.getID()}
-                queue = [(start_node, 0)]
+                visited = set(start_nodes)
+                queue = [(n, 0) for n in start_nodes]
                 
                 while queue:
                     current_node, depth = queue.pop(0)
@@ -208,21 +240,19 @@ class PeerRewardingWrapper(BaseParallelWrapper):
                     if depth >= max_depth:
                         continue
                         
-                    for edge in current_node.getOutgoing():
-                        next_node = edge.getToNode()
-                        next_id = next_node.getID()
-                        
-                        if next_id in visited:
+                    for next_node in node_adj.get(current_node, []):
+                        if next_node in visited:
                             continue
                             
-                        visited.add(next_id)
+                        visited.add(next_node)
                         
-                        if next_id in valid_agents and next_id != agent:
-                            # We found another traffic light! Log it and stop searching this path.
-                            neighbours[agent].add(next_id)
-                            neighbours[next_id].add(agent)
+                        hit_tls = node_to_tls.get(next_node)
+                        # We hit another valid traffic light!
+                        if hit_tls and hit_tls != agent and hit_tls in valid_agents:
+                            neighbours[agent].add(hit_tls)
+                            neighbours[hit_tls].add(agent)
                         else:
-                            # It's a regular geometry node, keep tracing down the road.
+                            # Keep driving down the road
                             queue.append((next_node, depth + 1))
                             
             return {agent: list(agent_neighbours) for agent, agent_neighbours in neighbours.items()}
