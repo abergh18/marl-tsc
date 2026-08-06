@@ -456,30 +456,32 @@ class SumoTrafficEnv(ParallelEnv):
 
     def _reward_for_agent(self, agent: str) -> float:
         """
-        Computes the reward for a traffic light agent.
-        
-        This uses a positive baseline score and squares the queue lengths 
-        to ensure fairness across all lanes and prevent the cartel exploit.
+        Computes the reward for a traffic light agent using direct TraCI queries.
         """
         traci = self._import_traci()
         
-        lanes = self._tls_to_lanes.get(agent, [])
+        # FOOLPROOF FIX: Ask TraCI directly for the lanes and remove duplicates
+        raw_lanes = traci.trafficlight.getControlledLanes(agent)
+        lanes = list(set(raw_lanes))
         
         total_penalty = 0.0
         
+        # 1. Square the halted vehicles to penalise long wait times heavily
         for lane_id in lanes:
             halted = traci.lane.getLastStepHaltingNumber(lane_id)
-            
             total_penalty += float(halted ** 2)
             
+        # 2. Apply the switch penalty to prevent light flickering
         switched = self._switched_last_step.get(agent, False)
         switch_penalty = self.switch_penalty if switched else 0.0
         
-        baseline_score = 100.0
+        # 3. Invert the reward to stop the zero-sum cartel exploit.
+        # (Adjust this baseline back to 100.0 if you want a higher score ceiling)
+        baseline_score = 10.0
         reward = baseline_score - total_penalty - switch_penalty
         
+        # 4. Cap the reward at 0.0
         return max(0.0, reward)
-
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
         self._start_sumo(seed=seed)
