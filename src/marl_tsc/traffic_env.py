@@ -455,35 +455,37 @@ class SumoTrafficEnv(ParallelEnv):
         return local_queue, mean_local_queue, max_local_queue
 
     def _reward_for_agent(self, agent: str) -> float:
-        """Computes Max-Pressure reward for a traffic light agent.
-
-        Calculates the difference between incoming halted vehicles and
-        outgoing halted vehicles to prevent network gridlock.
+        """
+        Computes the reward for a traffic light agent.
+        
+        This uses a positive baseline score and squares the queue lengths 
+        to ensure fairness across all lanes and prevent the cartel exploit.
         """
         traci = self._import_traci()
         
-        # 1. Measure all incoming halted vehicles (moving < 0.1 m/s)
-        incoming_lanes = self._tls_to_lanes.get(agent, [])
-        incoming_halting = sum(
-            traci.lane.getLastStepHaltingNumber(lane_id)
-            for lane_id in incoming_lanes
-        )
-
-        # 2. Measure outgoing halted vehicles (if mapped in your environment)
-        outgoing_lanes = getattr(self, "_tls_to_out_lanes", {}).get(agent, [])
-        outgoing_halting = sum(
-            traci.lane.getLastStepHaltingNumber(lane_id)
-            for lane_id in outgoing_lanes
-        )
-
-        # 3. Pressure calculation
-        pressure = incoming_halting - outgoing_halting
-
-        # 4. Phase switch penalty to prevent rapid flickering
+        # Check all incoming lanes without slicing, ensuring full visibility
+        lanes = self._tls_to_lanes.get(agent, [])
+        
+        total_penalty = 0.0
+        
+        # 1. Square the halted vehicles to penalise long wait times heavily
+        for lane_id in lanes:
+            halted = traci.lane.getLastStepHaltingNumber(lane_id)
+            
+            total_penalty += float(halted ** 2)
+            
+        # 2. Apply the switch penalty to prevent light flickering
         switched = self._switched_last_step.get(agent, False)
-        penalty = self.switch_penalty if switched else 0.0
-
-        return -float(pressure) - penalty
+        switch_penalty = self.switch_penalty if switched else 0.0
+        
+        # 3. Invert the reward to stop the zero-sum cartel exploit.
+        # Start with a positive baseline score and subtract the penalties.
+        baseline_score = 100.0
+        reward = baseline_score - total_penalty - switch_penalty
+        
+        # 4. Cap the reward at 0.0 so negative numbers cannot be exploited
+        # by the absolute value abs() function in the gifting wrapper.
+        return max(0.0, reward)
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
