@@ -455,34 +455,35 @@ class SumoTrafficEnv(ParallelEnv):
         return local_queue, mean_local_queue, max_local_queue
 
     def _reward_for_agent(self, agent: str) -> float:
-        """Computes the reward for an agent based on waiting times.
-        
-        Blends the reduction in waiting time (delta) with an absolute 
-        penalty for current waiting time, encouraging the agent to clear 
-        queues while penalising prolonged waits.
+        """Computes Max-Pressure reward for a traffic light agent.
+
+        Calculates the difference between incoming halted vehicles and
+        outgoing halted vehicles to prevent network gridlock.
         """
         traci = self._import_traci()
-        lanes = self._tls_to_lanes.get(agent, [])
-        lane_ids = lanes[:self.max_lanes_per_tls]
-    
-        current_waiting = float(sum(
-            traci.lane.getWaitingTime(lane_id)
-            for lane_id in lane_ids
-        ))
-    
-        prev_waiting = self._prev_waiting_time.get(agent, current_waiting)
-        delta = prev_waiting - current_waiting
-    
-        self._prev_waiting_time[agent] = current_waiting
-    
+        
+        # 1. Measure all incoming halted vehicles (moving < 0.1 m/s)
+        incoming_lanes = self._tls_to_lanes.get(agent, [])
+        incoming_halting = sum(
+            traci.lane.getLastStepHaltingNumber(lane_id)
+            for lane_id in incoming_lanes
+        )
+
+        # 2. Measure outgoing halted vehicles (if mapped in your environment)
+        outgoing_lanes = getattr(self, "_tls_to_out_lanes", {}).get(agent, [])
+        outgoing_halting = sum(
+            traci.lane.getLastStepHaltingNumber(lane_id)
+            for lane_id in outgoing_lanes
+        )
+
+        # 3. Pressure calculation
+        pressure = incoming_halting - outgoing_halting
+
+        # 4. Phase switch penalty to prevent rapid flickering
         switched = self._switched_last_step.get(agent, False)
         penalty = self.switch_penalty if switched else 0.0
-    
-        # Blend: 70% delta signal + 30% absolute penalty
-        delta_reward = delta / 10.0
-        abs_reward = -current_waiting / 100.0
-        
-        return (0.7 * delta_reward + 0.3 * abs_reward) - penalty
+
+        return -float(pressure) - penalty
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
