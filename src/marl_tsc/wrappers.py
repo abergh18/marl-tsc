@@ -8,6 +8,8 @@ and implement peer-rewarding and zero-sum gifting mechanics.
 
 from __future__ import annotations
 
+import math
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -148,7 +150,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         self.neighbours = self._discover_neighbours(env.unwrapped.config_file, self.possible_agents)
         
         print("\n=============================================")
-        print("Discovered Network Neighbours:")
+        print("Discovered Network Neighbours (By Distance):")
         for a, n in self.neighbours.items():
             print(f"  {a} -> {n}")
         print("=============================================\n")
@@ -162,15 +164,14 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         }
         
     def _discover_neighbours(self, config_file: Path, valid_agents: list[str]) -> dict[str, list[str]]:
-        """Parses the SUMO network directly via XML to find adjacent traffic lights."""
-        import xml.etree.ElementTree as ET
-        
+        """Parses the SUMO network XML to find the physically closest traffic lights."""
         neighbours = {agent: set() for agent in valid_agents}
         
         try:
             config_path = Path(config_file)
             net_file_path = None
             
+            # 1. Read the sumocfg to find the net.xml
             try:
                 tree = ET.parse(config_path)
                 for element in tree.iter("net-file"):
@@ -186,79 +187,70 @@ class PeerRewardingWrapper(BaseParallelWrapper):
                     raise FileNotFoundError("Could not find a .net.xml file.")
                 net_file_path = net_files[0]
                 
-            # Parse the .net.xml directly to avoid sumolib node mapping errors
+            # 2. Extract X/Y coordinates for every junction directly from XML
             net_tree = ET.parse(net_file_path)
             net_root = net_tree.getroot()
             
-            node_to_tls = {}
-            tls_to_nodes = {agent: [] for agent in valid_agents}
+            agent_coords = {}
             
-            # 1. Map physical junctions to traffic light program IDs
             for junction in net_root.findall("junction"):
                 j_id = junction.get("id")
                 tl_id = junction.get("tl")
                 
-                if tl_id in valid_agents and j_id:
-                    node_to_tls[j_id] = tl_id
-                    tls_to_nodes[tl_id].append(j_id)
+                # Check if this junction belongs to one of our valid agents
+                target_agent = None
+                if tl_id in valid_agents:
+                    target_agent = tl_id
+                elif j_id in valid_agents:
+                    target_agent = j_id
                     
-            # Fallback if IDs perfectly match
-            for agent in valid_agents:
-                if not tls_to_nodes[agent]:
-                    node_to_tls[agent] = agent
-                    tls_to_nodes[agent].append(agent)
-            
-            # 2. Map all road connections (edges)
-            node_adj = {}
-            for edge in net_root.findall("edge"):
-                from_n = edge.get("from")
-                to_n = edge.get("to")
+                if target_agent:
+                    try:
+                        x = float(junction.get("x"))
+                        y = float(junction.get("y"))
+                        if target_agent not in agent_coords:
+                            agent_coords[target_agent] = []
+                        agent_coords[target_agent].append((x, y))
+                    except (TypeError, ValueError):
+                        pass
+                        
+            # 3. Average coordinates for clustered junctions
+            final_coords = {}
+            for agent, coords in agent_coords.items():
+                avg_x = sum(c[0] for c in coords) / len(coords)
+                avg_y = sum(c[1] for c in coords) / len(coords)
+                final_coords[agent] = (avg_x, avg_y)
                 
-                if from_n and to_n:
-                    if from_n not in node_adj:
-                        node_adj[from_n] = []
-                    node_adj[from_n].append(to_n)
-                    
-                    if to_n not in node_adj:
-                        node_adj[to_n] = []
-                    node_adj[to_n].append(from_n)
-                    
-            # 3. Use BFS to trace physical roads between traffic lights
-            max_depth = 15
+            # 4. Link each agent to its physically closest neighbours
+            # Connect to up to 3 nearby agents
+            k_neighbours = min(3, len(valid_agents) - 1)
             
             for agent in valid_agents:
-                start_nodes = tls_to_nodes.get(agent, [])
-                if not start_nodes:
+                if agent not in final_coords:
                     continue
                     
-                visited = set(start_nodes)
-                queue = [(n, 0) for n in start_nodes]
+                x1, y1 = final_coords[agent]
+                distances = []
                 
-                while queue:
-                    current_node, depth = queue.pop(0)
-                    
-                    if depth >= max_depth:
+                for other_agent in valid_agents:
+                    if agent == other_agent or other_agent not in final_coords:
                         continue
-                        
-                    for next_node in node_adj.get(current_node, []):
-                        if next_node in visited:
-                            continue
-                            
-                        visited.add(next_node)
-                        
-                        hit_tls = node_to_tls.get(next_node)
-                        # We hit another valid traffic light!
-                        if hit_tls and hit_tls != agent and hit_tls in valid_agents:
-                            neighbours[agent].add(hit_tls)
-                            neighbours[hit_tls].add(agent)
-                        else:
-                            # Keep driving down the road
-                            queue.append((next_node, depth + 1))
-                            
+                    
+                    x2, y2 = final_coords[other_agent]
+                    # Calculate physical Euclidean distance
+                    dist = math.hypot(x2 - x1, y2 - y1)
+                    distances.append((dist, other_agent))
+                    
+                # Sort by shortest distance and add links
+                distances.sort(key=lambda item: item[0])
+                for dist, closest_agent in distances[:k_neighbours]:
+                    neighbours[agent].add(closest_agent)
+                    neighbours[closest_agent].add(agent)  # Ensure the link goes both ways
+                    
             return {agent: list(agent_neighbours) for agent, agent_neighbours in neighbours.items()}
             
         except Exception as e:
-            print(f"Warning: Failed to parse neighbours ({e}). Defaulting to all-to-all gifting.")
+            print(f"Warning: Failed to map coordinates ({e}). Defaulting to all-to-all gifting.")
             return {a: [other for other in valid_agents if other != a] for a in valid_agents}
 
     def action_space(self, agent):
