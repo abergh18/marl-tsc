@@ -1,4 +1,3 @@
-%%writefile /content/marl-tsc/src/marl_tsc/wrappers.py
 """
 wrappers.py
 
