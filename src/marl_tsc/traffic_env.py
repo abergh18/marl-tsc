@@ -478,7 +478,9 @@ class SumoTrafficEnv(ParallelEnv):
                     max_wait_time = float(wait_time)
                 
         queue_penalty = total_halted
-        wait_penalty = (max_wait_time / 10.0) ** 2
+        
+        wait_penalty = (max_wait_time / 5.0) ** 2
+        
         total_penalty = queue_penalty + wait_penalty
         
         switched = self._switched_last_step.get(agent, False)
@@ -487,8 +489,6 @@ class SumoTrafficEnv(ParallelEnv):
         baseline_score = 1000.0
         reward = baseline_score - total_penalty - switch_penalty
         
-        # We ensure the reward does not drop below zero, then scale it down safely.
-        # This prevents gradient explosion whilst preserving the sharing economy.
         reward = max(0.0, reward) / 100.0
         
         return reward
