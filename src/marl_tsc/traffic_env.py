@@ -472,16 +472,13 @@ class SumoTrafficEnv(ParallelEnv):
             total_halted += float(halted)
             
             vehicle_ids = traci.lane.getLastStepVehicleIDs(lane_id)
-            
             for veh_id in vehicle_ids:
                 wait_time = traci.vehicle.getWaitingTime(veh_id)
                 if wait_time > max_wait_time:
                     max_wait_time = float(wait_time)
                 
         queue_penalty = total_halted
-        
         wait_penalty = (max_wait_time / 10.0) ** 2
-        
         total_penalty = queue_penalty + wait_penalty
         
         switched = self._switched_last_step.get(agent, False)
@@ -490,7 +487,11 @@ class SumoTrafficEnv(ParallelEnv):
         baseline_score = 1000.0
         reward = baseline_score - total_penalty - switch_penalty
         
-        return max(0.0, reward)
+        # We ensure the reward does not drop below zero, then scale it down safely.
+        # This prevents gradient explosion whilst preserving the sharing economy.
+        reward = max(0.0, reward) / 100.0
+        
+        return reward
     
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
