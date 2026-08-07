@@ -479,7 +479,7 @@ class SumoTrafficEnv(ParallelEnv):
                 
         queue_penalty = total_halted
         
-        wait_penalty = (max_wait_time / 5.0) ** 2
+        wait_penalty = (max_wait_time / 10.0) ** 2
         
         total_penalty = queue_penalty + wait_penalty
         
