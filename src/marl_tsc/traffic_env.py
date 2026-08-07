@@ -457,29 +457,44 @@ class SumoTrafficEnv(ParallelEnv):
     def _reward_for_agent(self, agent: str) -> float:
         """
         Computes the reward for a traffic light agent using direct TraCI queries.
+        Penalises both general queue length and extreme individual wait times.
         """
         traci = self._import_traci()
         
-        # FOOLPROOF FIX: Ask TraCI directly for the lanes and remove duplicates
+        # Ask TraCI directly for the lanes and remove duplicates
         raw_lanes = traci.trafficlight.getControlledLanes(agent)
         lanes = list(set(raw_lanes))
         
-        total_penalty = 0.0
+        total_halted = 0.0
+        max_wait_time = 0.0
         
-        # 1. Square the halted vehicles to penalise long wait times heavily
         for lane_id in lanes:
+            # 1. Count standing traffic
             halted = traci.lane.getLastStepHaltingNumber(lane_id)
-            total_penalty += float(halted ** 2)
+            total_halted += float(halted)
             
-        # 2. Apply the switch penalty to prevent light flickering
+            # 2. Find the single longest-waiting car on this lane
+            wait_time = traci.lane.getMaxWaitingTime(lane_id)
+            if wait_time > max_wait_time:
+                max_wait_time = float(wait_time)
+                
+        # Base penalty for having cars queued up
+        queue_penalty = total_halted
+        
+        # Exponential penalty for unfairness (time loss).
+        # Dividing by 10 scales it reasonably: a 60s wait = 36 penalty.
+        # A 120s wait = 144 penalty. The AI will panic and turn the light green!
+        wait_penalty = (max_wait_time / 10.0) ** 2
+        
+        total_penalty = queue_penalty + wait_penalty
+        
         switched = self._switched_last_step.get(agent, False)
         switch_penalty = self.switch_penalty if switched else 0.0
         
-        # 3. Invert the reward to stop the zero-sum cartel exploit.
-        # (Adjust this baseline back to 100.0 if you want a higher score ceiling)
-        baseline_score = 10.0
+        baseline_score = 100.0
         reward = baseline_score - total_penalty - switch_penalty
         
+        return max(0.0, reward)
         # 4. Cap the reward at 0.0
         return max(0.0, reward)
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
