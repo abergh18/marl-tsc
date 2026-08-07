@@ -460,7 +460,7 @@ def train_mappo(
                 episode_returns.append(current_episode_return)
                 print(
                     f"[MAPPO] Episode {episode_index} | "
-                    f"Raw Return: {current_episode_return:.2f} | "
+                    f"Return: {current_episode_return:.2f} | "
                     f"Total Steps: {global_steps}"
                 )
                 current_episode_return = 0.0
