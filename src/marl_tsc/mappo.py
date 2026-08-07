@@ -186,7 +186,7 @@ def train_mappo(
     max_steps=1000,
     seed=42,
     env_kwargs=None,
-    use_peer_reward=True,
+    use_peer_reward=False,
 ):
     """Train a shared-actor / centralised-critic MAPPO with optional peer rewarding."""
 
@@ -331,6 +331,7 @@ def train_mappo(
     value_coef = 0.5
     local_reward_weight = 0.7 if not use_peer_reward else 0.85
 
+    policy_label = "mappo_peer_reward" if use_peer_reward else "mappo"
     history: list[dict[str, Any]] = []
     global_steps = 0
     episode_index = 0
@@ -527,7 +528,7 @@ def train_mappo(
         scheduler.step()
 
         history.append({
-            "algorithm": "mappo",
+            "algorithm": policy_label,
             "timestep": global_steps,
             "mean_training_reward": float(np.mean(rewards_array)),
             "moving_avg_episode_return": (
@@ -535,8 +536,6 @@ def train_mappo(
             ),
             "episodes_completed": episode_index,
         })
-
-    policy_label = "mappo_peer_reward" if use_peer_reward else "mappo"
 
     model = MappoModel(
         actor=actor,

@@ -146,7 +146,8 @@ def train_ppo(
     model_path = output_dir / f"{algorithm}_sumo_traffic"
 
     try:
-        model.learn(total_timesteps=total_timesteps, callback=reward_logger)
+        ppo_timesteps = total_timesteps * len(traffic_light_ids) # PPO treats each individual agent descision as a timestep
+        model.learn(total_timesteps=ppo_timesteps, callback=reward_logger)
         output_dir.mkdir(parents=True, exist_ok=True)
         model.save(model_path)
     finally:
@@ -248,9 +249,6 @@ def evaluate_policy(
             **env_options,
         )
         
-        from marl_tsc.wrappers import MinimumGreenTimeWrapper
-        env = MinimumGreenTimeWrapper(env, min_green_steps=10)
-
         observations, infos = env.reset(seed=seed + episode_index)
 
         episode_reward = 0.0
@@ -357,6 +355,54 @@ def evaluate_policy(
         "mean_vehicle_count": _mean_or_zero(episode_vehicle_counts),
         "episode_details": episode_details,
     }
+
+
+def evaluate_policies(
+    config_file,
+    traffic_light_ids,
+    policies,
+    episodes=3,
+    max_steps=1000,
+    seed=42,
+    env_kwargs=None,
+):
+    """Evaluate named policies with the same simulation settings and seeds."""
+
+    results = {}
+    for name, policy in policies.items():
+        print(f"Evaluating {name}")
+        results[name] = evaluate_policy(
+            config_file=config_file,
+            traffic_light_ids=traffic_light_ids,
+            policy=policy,
+            episodes=episodes,
+            max_steps=max_steps,
+            seed=seed,
+            env_kwargs=env_kwargs,
+        )
+    return results
+
+
+def evaluation_results_table(policy_results):
+    """Return the average evaluation metrics as a pandas table."""
+
+    import pandas as pd
+
+    rows = [
+        {
+            "Policy": name,
+            "Mean reward": result["mean_total_reward"],
+            "Mean queue": result["mean_local_queue"],
+            "Mean max queue": result["mean_max_queue"],
+            "Mean wait": result["mean_waiting_time"],
+            "Mean max wait": result["mean_max_waiting_time"],
+            "Mean time loss": result["mean_total_time_loss"],
+            "Mean arrivals": result["mean_arrived_vehicles_per_episode"],
+            "Mean switches": result["mean_switches_per_episode"],
+        }
+        for name, result in policy_results.items()
+    ]
+    return pd.DataFrame(rows)
 
 
 def export_policy_replay(
@@ -479,13 +525,20 @@ def export_policy_replay(
 
 
 def plot_training_histories(histories):
-    """Plot training reward curves for one or more algorithms."""
+    """Plot training reward curves for one or more algorithms.
+
+    ``histories`` may be one combined history list or a mapping from display
+    names to individual history lists.
+    """
 
     import matplotlib.pyplot as plt
 
-    grouped = defaultdict(list)
-    for record in histories:
-        grouped[str(record["algorithm"])].append(record)
+    if isinstance(histories, dict):
+        grouped = histories
+    else:
+        grouped = defaultdict(list)
+        for record in histories:
+            grouped[str(record["algorithm"])].append(record)
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -513,40 +566,6 @@ def plot_training_histories(histories):
         ax.legend()
     fig.tight_layout()
     return fig, ax
-
-
-def plot_evaluation_results(policy_results):
-    """Plot per-episode evaluation reward, queue, waiting time, and switches."""
-
-    import matplotlib.pyplot as plt
-
-    metrics = [
-        ("total_reward", "Reward"),
-        ("mean_local_queue", "Mean queue"),
-        ("mean_waiting_time", "Mean waiting time"),
-        ("max_waiting_time", "Max waiting time"),
-        ("switches", "Switches"),
-    ]
-    fig, axes = plt.subplots(3, 2, figsize=(10, 9))
-
-    for ax, (metric, title) in zip(axes.ravel(), metrics):
-        for policy_name, result in policy_results.items():
-            details = result.get("episode_details", [])
-            if not details:
-                continue
-            episodes = [item["episode"] for item in details]
-            values = [item[metric] for item in details]
-            ax.plot(episodes, values, marker="o", label=policy_name)
-        ax.set_title(title)
-        ax.set_xlabel("Evaluation episode")
-        ax.grid(alpha=0.25)
-
-    for ax in axes.ravel()[len(metrics):]:
-        ax.axis("off")
-
-    axes[0, 0].legend()
-    fig.tight_layout()
-    return fig, axes
 
 
 def plot_moving_average_histories(histories, window=100):

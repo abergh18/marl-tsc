@@ -100,6 +100,8 @@ class SimulationGenerator:
             str(self.network_file),
             "-o",
             str(self.trips_file),
+            "-r",
+            str(self.routes_file),
             "--begin",
             str(self.trip_begin),
             "--end",
