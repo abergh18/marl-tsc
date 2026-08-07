@@ -421,7 +421,6 @@ def train_mappo(
                 local_reward_weight * local_rewards
                 + (1.0 - local_reward_weight) * global_reward
             )
-            blended_rewards = np.clip(blended_rewards, -10.0, 10.0)
             
             # Extract raw traffic rewards for apples-to-apples evaluation graphs
             raw_step_rewards = [
@@ -494,7 +493,6 @@ def train_mappo(
             gamma,
             gae_lambda,
         )
-        advantages = np.clip(advantages, -10.0, 10.0)
         
         # Normalise the advantages for stable training
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
