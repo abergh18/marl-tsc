@@ -487,7 +487,7 @@ class SumoTrafficEnv(ParallelEnv):
         switched = self._switched_last_step.get(agent, False)
         switch_penalty = self.switch_penalty if switched else 0.0
         
-        baseline_score = 100.0
+        baseline_score = 1000.0
         reward = baseline_score - total_penalty - switch_penalty
         
         return max(0.0, reward)
