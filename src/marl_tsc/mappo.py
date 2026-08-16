@@ -327,7 +327,7 @@ def train_mappo(
     scheduler = torch.optim.lr_scheduler.LinearLR(
         optimiser,
         start_factor=1.0,
-        end_factor=0.1,
+        end_factor=1.0,
         total_iters=total_timesteps // rollout_steps,
     )
 
