@@ -437,6 +437,8 @@ def train_mappo(
                         "gift_fraction":  float(next_infos[agent_id].get("gift_fraction", 0.0)),
                         "gift_amount":    float(next_infos[agent_id].get("gift_amount", 0.0)),
                         "raw_reward":     float(next_infos[agent_id].get("raw_traffic_reward", 0.0)),
+                        "received_amount": float(next_infos[agent_id].get("received_amount", 0.0)),
+                        "net_transfer":    float(next_infos[agent_id].get("net_transfer",    0.0)),                  
                     }
                     for agent_id in agent_ids
                 }
@@ -609,6 +611,9 @@ def train_mappo(
                     "mean_gift_amount":   float(np.mean(amounts)),
                     "mean_raw_reward":    float(np.mean(raw_rs)),
                     "gift_rate":          float(np.mean([f > 0 for f in fractions])),
+                    "mean_received_amount": float(np.mean([s[agent_id]["received_amount"] for s in rollout_gifting])),
+                    "mean_net_transfer":    float(np.mean([s[agent_id]["net_transfer"]    for s in rollout_gifting])),
+
                 }
             
             history[-1]["per_agent_gifting"] = per_agent_gifting

@@ -100,7 +100,7 @@ class ZeroSumCalculator:
         for agent in agent_ids:
             redistributed[agent] = rewards[agent] - gifts[agent] + shares[agent]
 
-        return redistributed
+        return redistributed, shares
 
     def stats(
         self,
@@ -254,7 +254,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         if self.neighbours is None:
             self.neighbours = {a: [] for a in agent_ids}
 
-        redistributed = self.calculator.redistribute(
+        redistributed, received= self.calculator.redistribute(
             rewards=rewards,
             gifting_actions=gifting_actions,
             agent_ids=agent_ids,
@@ -268,17 +268,16 @@ class PeerRewardingWrapper(BaseParallelWrapper):
         )
 
         for agent in agent_ids:
-            infos[agent]["raw_traffic_reward"] = rewards[agent]
-            infos[agent]["gift_fraction"] = (
-                gifting_actions[agent] / self.division
-            )
-            infos[agent]["gift_amount"] = (
-                gifting_actions[agent] / self.division * abs(rewards[agent])
-            )
-            infos[agent]["mean_gift_fraction"] = stats["mean_gift_fraction"]
-            infos[agent]["gift_rate"] = stats["gift_rate"]
-            infos[agent]["mean_gift_amount"] = stats["mean_gift_amount"]
-
+          agent_gift_amt = gifting_actions[agent] / self.division * abs(rewards[agent])
+          infos[agent]["raw_traffic_reward"] = rewards[agent]
+          infos[agent]["gift_fraction"]      = gifting_actions[agent] / self.division
+          infos[agent]["gift_amount"]        = agent_gift_amt
+          infos[agent]["received_amount"]    = received[agent]
+          infos[agent]["net_transfer"]       = received[agent] - agent_gift_amt
+          infos[agent]["mean_gift_fraction"] = stats["mean_gift_fraction"]
+          infos[agent]["gift_rate"]          = stats["gift_rate"]
+          infos[agent]["mean_gift_amount"]   = stats["mean_gift_amount"]
+        
         infos = self._update_action_masks(infos)
         return obs, redistributed, terms, truncs, infos
 

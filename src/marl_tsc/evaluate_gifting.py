@@ -164,7 +164,14 @@ def _visualise_per_agent(
 
     # Build per-agent time series
     agent_data = {
-        aid: {"gift_amt": [], "raw_reward": [], "gift_frac": [], "gift_rate": []}
+        aid: {
+            "gift_amt":        [],
+            "raw_reward":      [],
+            "gift_frac":       [],
+            "gift_rate":       [],
+            "received_amount": [],
+            "net_transfer":    [],
+        }
         for aid in agent_ids
     }
     for step in history:
@@ -175,6 +182,8 @@ def _visualise_per_agent(
             agent_data[aid]["raw_reward"].append(d.get("mean_raw_reward",  0.0))
             agent_data[aid]["gift_frac"].append(d.get("mean_gift_fraction",0.0))
             agent_data[aid]["gift_rate"].append(d.get("gift_rate",         0.0))
+            agent_data[aid]["received_amount"].append(d.get("mean_received_amount", 0.0))
+            agent_data[aid]["net_transfer"].append(d.get("mean_net_transfer",       0.0))
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5), facecolor=PALETTE["bg"])
     for ax in axes:
@@ -212,19 +221,17 @@ def _visualise_per_agent(
     ax = axes[2]
     cutoff = int(len(history) * 0.8)
     for i, aid in enumerate(agent_ids):
-        frac  = np.mean(agent_data[aid]["gift_frac"][cutoff:])
+        net   = np.mean(agent_data[aid]["net_transfer"][cutoff:])
         raw_r = np.mean(agent_data[aid]["raw_reward"][cutoff:])
         amt   = np.mean(agent_data[aid]["gift_amt"][cutoff:])
         size  = max(30, min(500, abs(amt) * 100 + 30))
-        ax.scatter(frac, raw_r, c=cols[i], s=size, alpha=0.85,
+        ax.scatter(net, raw_r, c=cols[i], s=size, alpha=0.85,
                    edgecolors="white", linewidths=0.8, zorder=5)
-        ax.annotate(_short(aid, 12), (frac, raw_r),
+        ax.annotate(_short(aid, 12), (net, raw_r),
                     xytext=(4, 4), textcoords="offset points",
                     fontsize=7, color=cols[i])
-    ax.axvline(0.5, color=PALETTE["muted"], lw=1, linestyle="--", alpha=0.6)
-    ax.set_title("Gift Fraction vs Raw Reward\n(final 20%, bubble = gift amount)",
-                 fontsize=10, fontweight="500")
-    ax.set_xlabel("Mean gift fraction", fontsize=9)
+    ax.axvline(0, color=PALETTE["muted"], lw=1, linestyle="--", alpha=0.6)  # zero line
+    ax.set_xlabel("Mean net transfer (positive = net receiver)", fontsize=9)
     ax.set_ylabel("Mean raw reward", fontsize=9)
 
     fig.suptitle(f"{algorithm_name} — Per-Agent Gifting Detail",
@@ -302,13 +309,20 @@ def print_gifting_summary(history: list, agent_ids: list) -> None:
         amounts    = [h["per_agent_gifting"][agent_id]["mean_gift_amount"]   for h in gifting_entries]
         raw_rs     = [h["per_agent_gifting"][agent_id]["mean_raw_reward"]    for h in gifting_entries]
         gift_rates = [h["per_agent_gifting"][agent_id]["gift_rate"]          for h in gifting_entries]
+        received  = [h["per_agent_gifting"][agent_id]["mean_received_amount"] for h in gifting_entries]
+        net       = [h["per_agent_gifting"][agent_id]["mean_net_transfer"]    for h in gifting_entries]
 
         short = agent_id[:30] + "…" if len(agent_id) > 30 else agent_id
         print(f"\n  {short}")
+        print(f"Giving:")
         print(f"    Mean gift fraction : {np.mean(fractions):.3f}")
         print(f"    Mean gift amount   : {np.mean(amounts):.4f}")
         print(f"    Mean raw reward    : {np.mean(raw_rs):.4f}")
         print(f"    Gift rate          : {np.mean(gift_rates):.3f}")
+        print(f"Receiving and Net:    ")
+        print(f"    Mean received amount : {np.mean(received):.4f}")
+        print(f"    Mean net transfer    : {np.mean(net):.4f}  {'(net receiver)' if np.mean(net) > 0 else '(net donor)'}")
+
 
     print("\n" + "=" * 70)
     print("AGGREGATE")
