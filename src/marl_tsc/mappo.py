@@ -358,6 +358,9 @@ def train_mappo(
         rollout_rewards: list[np.ndarray] = []
         rollout_raw_rewards: list[np.ndarray] = []
         
+        #Capturing gifting behaviour
+        rollout_gifting: list[np.ndarray] = []
+        
         rollout_values: list[np.ndarray] = []
         rollout_dones: list[bool] = []
 
@@ -427,6 +430,18 @@ def train_mappo(
                 float(next_infos[agent_id].get("raw_traffic_reward", rewards.get(agent_id, 0.0))) 
                 for agent_id in agent_ids
             ]
+            # Collect per-agent gifting data if reward sharing is active
+            if use_peer_reward:
+                step_gifting = {
+                    agent_id: {
+                        "gift_fraction":  float(next_infos[agent_id].get("gift_fraction", 0.0)),
+                        "gift_amount":    float(next_infos[agent_id].get("gift_amount", 0.0)),
+                        "raw_reward":     float(next_infos[agent_id].get("raw_traffic_reward", 0.0)),
+                    }
+                    for agent_id in agent_ids
+                }
+                rollout_gifting.append(step_gifting)
+
             current_episode_return += float(np.mean(raw_step_rewards))
             
             done = bool(any(terminations.values()) or any(truncations.values()))
@@ -581,7 +596,31 @@ def train_mappo(
                 float(np.mean(episode_returns)) if episode_returns else 0.0
             ),
             "episodes_completed": episode_index,
+            
         })
+        if use_peer_reward and rollout_gifting:
+            per_agent_gifting = {}
+            for agent_id in agent_ids:
+                fractions = [s[agent_id]["gift_fraction"] for s in rollout_gifting]
+                amounts   = [s[agent_id]["gift_amount"]   for s in rollout_gifting]
+                raw_rs    = [s[agent_id]["raw_reward"]     for s in rollout_gifting]
+                per_agent_gifting[agent_id] = {
+                    "mean_gift_fraction": float(np.mean(fractions)),
+                    "mean_gift_amount":   float(np.mean(amounts)),
+                    "mean_raw_reward":    float(np.mean(raw_rs)),
+                    "gift_rate":          float(np.mean([f > 0 for f in fractions])),
+                }
+            
+            history[-1]["per_agent_gifting"] = per_agent_gifting
+            history[-1]["mean_gift_fraction"] = float(np.mean([
+                per_agent_gifting[a]["mean_gift_fraction"] for a in agent_ids
+            ]))
+            history[-1]["gift_rate"] = float(np.mean([
+                per_agent_gifting[a]["gift_rate"] for a in agent_ids
+            ]))
+            history[-1]["mean_gift_amount"] = float(np.mean([
+                per_agent_gifting[a]["mean_gift_amount"] for a in agent_ids
+            ]))
 
     model = MappoModel(
         actor=actor,
