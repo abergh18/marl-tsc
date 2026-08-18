@@ -454,7 +454,7 @@ class SumoTrafficEnv(ParallelEnv):
         max_local_queue = float(max(lane_queues))
         return local_queue, mean_local_queue, max_local_queue
 
-    def _reward_for_agent(self, agent: str) -> float:
+def _reward_for_agent(self, agent: str) -> float:
         """
         Computes the reward for a traffic light agent using direct TraCI queries.
         Penalises both general queue length and extreme individual wait times.
@@ -479,7 +479,7 @@ class SumoTrafficEnv(ParallelEnv):
                 
         queue_penalty = total_halted
         
-        wait_penalty = (max_wait_time / 10.0) ** 2
+        wait_penalty = (max_wait_time / 5.0) ** 2
         
         total_penalty = queue_penalty + wait_penalty
         
@@ -489,6 +489,7 @@ class SumoTrafficEnv(ParallelEnv):
         baseline_score = 1000.0
         reward = baseline_score - total_penalty - switch_penalty
         
+
         reward = max(0.0, reward) / 100.0
         
         return reward
