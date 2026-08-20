@@ -337,7 +337,7 @@ def train_mappo(
     update_epochs = 10
     entropy_coef = 0.01
     value_coef = 0.5
-    local_reward_weight = 0.5 if not use_peer_reward else 0.85
+    local_reward_weight = 0.5
 
     policy_label = "mappo_peer_reward" if use_peer_reward else "mappo"
     history: list[dict[str, Any]] = []
