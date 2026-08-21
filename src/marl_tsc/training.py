@@ -224,6 +224,8 @@ def evaluate_policy(
 
     env_options = dict(env_kwargs or {})
     env_options.setdefault("global_metric_interval", 10)
+    # Do not penalize phase switching during evaluation
+    env_options["switch_penalty"] = 0.0
     
     episode_rewards = []
     episode_queues = []
