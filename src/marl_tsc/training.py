@@ -398,13 +398,10 @@ def evaluation_results_table(policy_results):
             "Mean max queue": result["mean_max_queue"],
             "Mean wait": result["mean_waiting_time"],
             "Mean max wait": result["mean_max_waiting_time"],
-            "Mean time loss": result["mean_total_time_loss"],
-            "Mean arrivals": result["mean_arrived_vehicles_per_episode"],
-            "Mean switches": result["mean_switches_per_episode"],
         }
         for name, result in policy_results.items()
     ]
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows).round(4)
 
 
 def export_policy_replay(
