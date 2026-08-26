@@ -190,6 +190,7 @@ def train_mappo(
     total_timesteps=50_000,
     rollout_steps=1000,
     max_steps=1000,
+    lr=5e-4,
     seed=42,
     env_kwargs=None,
     use_peer_reward=False,
@@ -317,7 +318,7 @@ def train_mappo(
     
     critic = Critic(obs_dim * num_agents).to(device)
 
-    learning_rate = 3e-4 #5e-5
+    learning_rate = lr
     optimiser = Adam(
         list(actor.parameters()) + list(critic.parameters()),
         lr=learning_rate,
@@ -327,7 +328,7 @@ def train_mappo(
     scheduler = torch.optim.lr_scheduler.LinearLR(
         optimiser,
         start_factor=1.0,
-        end_factor=1.0,
+        end_factor=1.0,#ALTER THIS TO RE-INSTATE LR DECAY
         total_iters=total_timesteps // rollout_steps,
     )
 
