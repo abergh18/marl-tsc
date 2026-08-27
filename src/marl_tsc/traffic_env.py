@@ -455,36 +455,10 @@ class SumoTrafficEnv(ParallelEnv):
         return local_queue, mean_local_queue, max_local_queue
 
     def _reward_for_agent(self, agent: str) -> float:
-
-        _, mean_local_queue, _ = self._local_queue_stats(agent)
-        previous_queue = self._previous_mean_local_queue.get(agent, mean_local_queue)
-        queue_improvement = previous_queue - mean_local_queue
-        switched = self._switched_last_step.get(agent, False)
-        switch_cost = self.switch_penalty if switched else 0.0
-        bounded_improvement = float(np.clip(queue_improvement, -5.0, 5.0))
-        bounded_queue = min(mean_local_queue, self.max_queue_value)
-        # ── Throughput bonus ──────────────────────────────────────────────────────
-        # Vehicles departed from lanes controlled by this agent this step.
-        # Gives a positive signal during heavy congestion where queue improvement
-        # is hard to achieve.
-        try:
-            controlled_lanes = traci.trafficlight.getControlledLanes(agent)
-            departed = sum(
-                traci.lane.getLastStepVehicleNumber(lane)
-                for lane in set(controlled_lanes)
-            )
-            throughput_bonus = 0.1 * departed
-        except Exception:
-            throughput_bonus = 0.0
-
-        return 0.25 * bounded_improvement - bounded_queue - switch_cost + throughput_bonus
-
-
-
-        '''
         """
         Computes the reward for a traffic light agent using direct TraCI queries.
         Penalises both general queue length and extreme individual wait times.
+        Returns a negative reward, with zero being optimal.
         """
         traci = self._import_traci()
         
@@ -505,21 +479,12 @@ class SumoTrafficEnv(ParallelEnv):
                     max_wait_time = float(wait_time)
                 
         queue_penalty = total_halted
-        
-        wait_penalty = (max_wait_time / 10.0) ** 2
-        
-        total_penalty = queue_penalty + wait_penalty
+        wait_penalty = (max_wait_time / 5.0) ** 2
         
         switched = self._switched_last_step.get(agent, False)
         switch_penalty = self.switch_penalty if switched else 0.0
         
-        baseline_score = 1000.0
-        reward = baseline_score - total_penalty - switch_penalty
-        
-        reward = max(0.0, reward) / 100.0
-        
-        return reward
-        '''
+        return -(queue_penalty + wait_penalty + switch_penalty)
     
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""
