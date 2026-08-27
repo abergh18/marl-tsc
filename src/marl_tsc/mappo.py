@@ -318,7 +318,7 @@ def train_mappo(
     
     critic = Critic(obs_dim * num_agents).to(device)
 
-    learning_rate = lr
+    learning_rate = 5e-5
     optimiser = Adam(
         list(actor.parameters()) + list(critic.parameters()),
         lr=learning_rate,
