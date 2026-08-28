@@ -222,7 +222,7 @@ def train_mappo(
     )
 
     if use_peer_reward:
-        env = PeerRewardingWrapper(env, division=20)
+        env = PeerRewardingWrapper(env, division=10)
 
     observations, infos = env.reset(seed=seed)
     agent_ids = tuple(traffic_light_ids or env.agents)
@@ -265,12 +265,13 @@ def train_mappo(
                 nn.LayerNorm(hidden_size),
                 nn.ReLU(),
             )
-            nn.init.zeros_(self.base[-2].weight)
-            nn.init.zeros_(self.base[-2].bias)
 
             self.branches = nn.ModuleList([
                 nn.Linear(hidden_size, dim) for dim in action_dims
             ])
+            for branch in self.branches:
+                nn.init.orthogonal_(branch.weight, gain=0.01)
+                nn.init.zeros_(branch.bias)
 
         def forward(self, obs: torch.Tensor) -> list[torch.Tensor]:
             x = self.base(obs)
@@ -327,14 +328,14 @@ def train_mappo(
     scheduler = torch.optim.lr_scheduler.LinearLR(
         optimiser,
         start_factor=1.0,
-        end_factor=1.0,
+        end_factor=0.1,
         total_iters=total_timesteps // rollout_steps,
     )
 
     gamma = 0.99
     gae_lambda = 0.95
     clip_coef = 0.2
-    update_epochs = 10
+    update_epochs = 5
     entropy_coef = 0.01
     value_coef = 0.5
     local_reward_weight = 0.5
