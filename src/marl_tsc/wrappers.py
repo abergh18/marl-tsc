@@ -137,12 +137,13 @@ class PeerRewardingWrapper(BaseParallelWrapper):
     PettingZoo wrapper implementing zero-sum peer reward sharing among neighbours.
     """
 
-    def __init__(self, env, division: int | None = None):
+    def __init__(self, env, division: int | None = None, k_peers: int = 3):
         super().__init__(env)
 
         self.possible_agents = list(env.possible_agents)
         self.division = division if division is not None else 10
         self.calculator = ZeroSumCalculator(num_divisions=self.division)
+        self.k =k_peers
         
         # We start with this empty, and populate it once the simulation boots up
         self.neighbours = None
@@ -186,7 +187,7 @@ class PeerRewardingWrapper(BaseParallelWrapper):
                 
         # 2. Link each agent to its physically closest neighbours
         neighbours = {agent: set() for agent in valid_agents}
-        k_neighbours = min(3, len(valid_agents) - 1)
+        k_neighbours = min(self.k, len(valid_agents) - 1)
         
         for agent in valid_agents:
             if agent not in agent_coords:
