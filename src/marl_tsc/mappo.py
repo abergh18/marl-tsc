@@ -190,9 +190,11 @@ def train_mappo(
     total_timesteps=50_000,
     rollout_steps=1000,
     max_steps=1000,
+    learning_rate = 3e-4,
     seed=42,
     env_kwargs=None,
     use_peer_reward=False,
+    k_peers = 3
 ):
     """Trains a shared-actor and centralised-critic MAPPO model."""
 
@@ -222,7 +224,7 @@ def train_mappo(
     )
 
     if use_peer_reward:
-        env = PeerRewardingWrapper(env, division=10)
+        env = PeerRewardingWrapper(env, division=10,k_peers=k_peers)
 
     observations, infos = env.reset(seed=seed)
     agent_ids = tuple(traffic_light_ids or env.agents)
@@ -318,7 +320,7 @@ def train_mappo(
     
     critic = Critic(obs_dim * num_agents).to(device)
 
-    learning_rate = 3e-4 #5e-5
+    learning_rate = learning_rate #3e-4 #5e-5
     optimiser = Adam(
         list(actor.parameters()) + list(critic.parameters()),
         lr=learning_rate,
