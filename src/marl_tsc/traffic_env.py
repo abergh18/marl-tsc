@@ -465,48 +465,6 @@ class SumoTrafficEnv(ParallelEnv):
         bounded_queue = min(mean_local_queue, self.max_queue_value)
 
         return 0.25 * bounded_improvement - bounded_queue - switch_cost
-
-
-
-        '''
-        """
-        Computes the reward for a traffic light agent using direct TraCI queries.
-        Penalises both general queue length and extreme individual wait times.
-        """
-        traci = self._import_traci()
-        
-        raw_lanes = traci.trafficlight.getControlledLanes(agent)
-        lanes = list(set(raw_lanes))
-        
-        total_halted = 0.0
-        max_wait_time = 0.0
-        
-        for lane_id in lanes:
-            halted = traci.lane.getLastStepHaltingNumber(lane_id)
-            total_halted += float(halted)
-            
-            vehicle_ids = traci.lane.getLastStepVehicleIDs(lane_id)
-            for veh_id in vehicle_ids:
-                wait_time = traci.vehicle.getWaitingTime(veh_id)
-                if wait_time > max_wait_time:
-                    max_wait_time = float(wait_time)
-                
-        queue_penalty = total_halted
-        
-        wait_penalty = (max_wait_time / 10.0) ** 2
-        
-        total_penalty = queue_penalty + wait_penalty
-        
-        switched = self._switched_last_step.get(agent, False)
-        switch_penalty = self.switch_penalty if switched else 0.0
-        
-        baseline_score = 1000.0
-        reward = baseline_score - total_penalty - switch_penalty
-        
-        reward = max(0.0, reward) / 100.0
-        
-        return reward
-        '''
     
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Resets the SUMO simulation and environment state."""

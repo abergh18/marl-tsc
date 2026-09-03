@@ -347,6 +347,8 @@ def train_mappo(
 
     episode_returns: deque = deque(maxlen=50)
     current_episode_return = 0.0
+    best_reward = float("-inf")
+    best_actor_state = None
 
     while global_steps < total_timesteps:
         rollout_local_obs: list[np.ndarray] = []
@@ -502,6 +504,11 @@ def train_mappo(
         raw_rewards_array = np.asarray(rollout_raw_rewards, dtype=np.float32)
         values_array = np.asarray(rollout_values, dtype=np.float32)
         dones_array = np.asarray(rollout_dones, dtype=np.bool_)
+
+        mean_raw_reward = float(np.mean(raw_rewards_array))
+        if global_steps >= 20_000 and mean_raw_reward > best_reward:
+            best_reward = mean_raw_reward
+            best_actor_state = {name: value.detach().cpu().clone() for name, value in actor.state_dict().items()}
 
         advantages, returns = _compute_gae(
             rewards_array,
@@ -661,6 +668,9 @@ def train_mappo(
     output_dir = Path(output_dir)
     model_path = output_dir / "models" / f"{policy_label}.pt"
     model_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if best_actor_state is not None:
+        actor.load_state_dict(best_actor_state)
     
     torch.save(
         {
