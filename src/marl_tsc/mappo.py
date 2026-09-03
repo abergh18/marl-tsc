@@ -508,6 +508,7 @@ def train_mappo(
         dones_array = np.asarray(rollout_dones, dtype=np.bool_)
 
         mean_raw_reward = float(np.mean(raw_rewards_array))
+        # Save the best actor for evaluation, don't keep early training which can fluctuate from a lot of randomness
         if global_steps >= 20_000 and mean_raw_reward > best_reward:
             best_reward = mean_raw_reward
             best_actor_state = {name: value.detach().cpu().clone() for name, value in actor.state_dict().items()}
