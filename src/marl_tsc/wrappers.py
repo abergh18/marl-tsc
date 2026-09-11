@@ -8,6 +8,7 @@ and implement peer-rewarding and zero-sum gifting mechanics.
 
 from __future__ import annotations
 
+import math
 import numpy as np
 from gymnasium.spaces import MultiDiscrete
 from pettingzoo.utils.wrappers import BaseParallelWrapper
@@ -24,14 +25,12 @@ class MinimumGreenTimeWrapper(BaseParallelWrapper):
         super().__init__(env)
         self.min_green_steps = min_green_steps
         
-        # Track the state of each intersection
         self.current_phase = {agent: 0 for agent in self.possible_agents}
         self.steps_since_switch = {agent: 0 for agent in self.possible_agents}
 
     def reset(self, seed=None, options=None):
         obs, infos = self.env.reset(seed=seed, options=options)
         
-        # Reset trackers for a new episode
         for agent in self.possible_agents:
             self.current_phase[agent] = 0
             self.steps_since_switch[agent] = self.min_green_steps
@@ -42,140 +41,26 @@ class MinimumGreenTimeWrapper(BaseParallelWrapper):
         overridden_actions = {}
 
         for agent, requested_action in actions.items():
-            # If the agent wants to switch to a new phase
             if requested_action != self.current_phase[agent]:
-                # Check if they have waited long enough
                 if self.steps_since_switch[agent] >= self.min_green_steps:
-                    # Approved! Update the phase and reset the timer
                     overridden_actions[agent] = requested_action
                     self.current_phase[agent] = requested_action
                     self.steps_since_switch[agent] = 1
                 else:
-                    # Denied! Force them to keep the current phase
                     overridden_actions[agent] = self.current_phase[agent]
                     self.steps_since_switch[agent] += 1
             else:
-                # Agent wants to keep the same phase anyway
                 overridden_actions[agent] = requested_action
                 self.steps_since_switch[agent] += 1
 
-        # Pass the (potentially overridden) actions to the real environment
         return self.env.step(overridden_actions)
-
-
-class PeerRewardingWrapper(BaseParallelWrapper):
-    """
-    A wrapper that adds simultaneous peer rewarding to a PettingZoo environment.
-    Uses a 'Public Goods' mechanic to prevent agents from exploiting negative 
-    rewards, forcing them to balance traffic management with community sharing.
-    """
-
-    def __init__(self, env, division=10):
-        super().__init__(env)
-        self.division = division
-        self.portion_size = 1.0 / division
-
-        # Expand the action space to a MultiDiscrete space:
-        # [Traffic Phase, Sharing Percentage]
-        self.action_spaces = {
-            agent: MultiDiscrete([
-                env.action_space(agent).n,
-                division + 1,
-            ])
-            for agent in self.possible_agents
-        }
-
-    def action_space(self, agent):
-        return self.action_spaces[agent]
-
-    def reset(self, seed=None, options=None):
-        obs, infos = self.env.reset(seed=seed, options=options)
-        infos = self._update_action_masks(infos)
-        return obs, infos
-
-    def step(self, actions):
-        env_actions = {}
-        sharing_actions = {}
-
-        # 1. Unpack the two separate actions
-        for agent, action in actions.items():
-            env_actions[agent] = action[0]
-            sharing_actions[agent] = action[1]
-
-        # 2. Step the underlying environment using ONLY the traffic actions
-        obs, rewards, terms, truncs, infos = self.env.step(env_actions)
-
-        final_rewards = {agent: 0.0 for agent in self.agents}
-        sharing_pool = 0.0
-        num_agents = len(self.agents)
-
-        # 3. Calculate Public Goods Game contributions
-        for agent in self.agents:
-            share_percentage = sharing_actions[agent] * self.portion_size
-            
-            personal_cost = share_percentage * 0.01
-            community_contribution = personal_cost * 2.0
-            
-            sharing_pool += community_contribution
-            final_rewards[agent] = rewards[agent] - personal_cost
-
-        # 4. Distribute the pooled community rewards equally
-        payout_per_agent = sharing_pool / max(1, num_agents)
-
-        for agent in self.agents:
-            final_rewards[agent] += payout_per_agent
-            
-            if "raw_traffic_reward" not in infos[agent]:
-                infos[agent]["raw_traffic_reward"] = rewards[agent]
-
-        infos = self._update_action_masks(infos)
-        return obs, final_rewards, terms, truncs, infos
-
-    def _update_action_masks(self, infos):
-        """Append a valid mask for the sharing action to the traffic mask."""
-        for agent, info in infos.items():
-            if "action_mask" in info:
-                traffic_mask = info["action_mask"]
-                sharing_mask = np.ones(self.division + 1, dtype=np.float32)
-                
-                info["action_mask"] = np.concatenate(
-                    [traffic_mask, sharing_mask]
-                )
-        return infos
 
 
 # ── Zero-sum gifting ──────────────────────────────────────────────────────────
 
 
 class ZeroSumCalculator:
-    """
-    Pure zero-sum reward redistribution logic.
-
-    Stateless class containing the zero-sum maths so ZeroSumRewardWrapper
-    stays clean and the redistribution logic is testable independently
-    of the PettingZoo interface.
-
-    Zero-sum property
-    -----------------
-    Whatever agent i gives, agent i loses. The gift is split equally
-    among all other agents. No reward is created or destroyed.
-
-        gift_i    = action_i * portion_size * abs(reward_i)
-        reward_i' = reward_i - gift_i + sum(share_j for j != i)
-
-    Note on negative rewards
-    ------------------------
-    SUMO rewards are negative queue penalties. Gift amounts are computed
-    on abs(reward) so gifting transfers genuine positive value rather
-    than offloading penalty onto peers.
-
-    Attribution
-    -----------
-    Zero-sum mechanic adapted from:
-
-        Lupu, A. & Precup, D. (2020). Gifting in Multi-Agent Reinforcement
-        Learning. Proceedings of AAMAS 2020.
-    """
+    """Zero-sum reward redistribution logic restricted to local neighbours."""
 
     def __init__(self, num_divisions: int):
         self.num_divisions = num_divisions
@@ -186,38 +71,36 @@ class ZeroSumCalculator:
         rewards: dict[str, float],
         gifting_actions: dict[str, int],
         agent_ids: list[str],
+        neighbours: dict[str, list[str]],
     ) -> dict[str, float]:
-        """
-        Apply zero-sum redistribution to a single timestep's rewards.
-        """
+        """Apply zero-sum redistribution only among neighbouring agents."""
         num_agents = len(agent_ids)
 
         if num_agents < 2:
             return rewards
 
-        # Compute gift amounts from abs(reward)
         gifts = {
             agent: gifting_actions[agent] * self.portion_size * abs(rewards[agent])
             for agent in agent_ids
         }
 
-        # Each gift split equally among num_agents - 1 peers
-        shares = {
-            agent: gifts[agent] / (num_agents - 1)
-            for agent in agent_ids
-        }
+        shares = {agent: 0.0 for agent in agent_ids}
+        for agent in agent_ids:
+            agent_neighbours = neighbours.get(agent, [])
+            active_neighbours = [n for n in agent_neighbours if n in agent_ids]
+            
+            if active_neighbours:
+                share_per_neighbour = gifts[agent] / len(active_neighbours)
+                for neighbour in active_neighbours:
+                    shares[neighbour] += share_per_neighbour
+            else:
+                shares[agent] += gifts[agent]
 
-        # Agent i loses its gift, gains one share from every other agent
         redistributed = {}
         for agent in agent_ids:
-            received = sum(
-                shares[other]
-                for other in agent_ids
-                if other != agent
-            )
-            redistributed[agent] = rewards[agent] - gifts[agent] + received
+            redistributed[agent] = rewards[agent] - gifts[agent] + shares[agent]
 
-        return redistributed
+        return redistributed, shares
 
     def stats(
         self,
@@ -225,9 +108,7 @@ class ZeroSumCalculator:
         gifting_actions: dict[str, int],
         agent_ids: list[str],
     ) -> dict[str, float]:
-        """
-        Compute gifting statistics for logging.
-        """
+        """Compute gifting statistics for logging."""
         fractions = [
             gifting_actions[agent] * self.portion_size
             for agent in agent_ids
@@ -236,6 +117,14 @@ class ZeroSumCalculator:
             gifting_actions[agent] * self.portion_size * abs(rewards[agent])
             for agent in agent_ids
         ]
+        
+        if not fractions:
+            return {
+                "mean_gift_fraction": 0.0,
+                "gift_rate": 0.0,
+                "mean_gift_amount": 0.0,
+            }
+            
         return {
             "mean_gift_fraction": float(sum(fractions) / len(fractions)),
             "gift_rate": float(sum(1 for f in fractions if f > 0) / len(fractions)),
@@ -243,24 +132,22 @@ class ZeroSumCalculator:
         }
 
 
-class ZeroSumRewardWrapper(BaseParallelWrapper):
+class PeerRewardingWrapper(BaseParallelWrapper):
     """
-    PettingZoo wrapper implementing zero-sum peer reward sharing.
-
-    Extends the action space with a discrete gifting action per agent.
-    After each environment step, rewards are redistributed using the
-    zero-sum mechanic: whatever an agent gives, it loses; gifts are
-    split equally among all other agents.
+    PettingZoo wrapper implementing zero-sum peer reward sharing among neighbours.
     """
 
-    def __init__(self, env, division: int | None = None):
+    def __init__(self, env, division: int | None = None, k_peers: int = 3):
         super().__init__(env)
 
-        num_agents = len(self.possible_agents)
-        self.division = division if division is not None else max(1, num_agents - 1)
+        self.possible_agents = list(env.possible_agents)
+        self.division = division if division is not None else 10
         self.calculator = ZeroSumCalculator(num_divisions=self.division)
+        self.k =k_peers
+        
+        # We start with this empty, and populate it once the simulation boots up
+        self.neighbours = None
 
-        # Extend action space: [Traffic Phase, Gifting Fraction]
         self.action_spaces = {
             agent: MultiDiscrete([
                 env.action_space(agent).n,
@@ -268,12 +155,84 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
             ])
             for agent in self.possible_agents
         }
+        
+    def _discover_neighbours_via_traci(self) -> dict[str, list[str]]:
+        """Queries the live TraCI simulation to find the physical centre of each intersection."""
+        traci = self.env.unwrapped._traci
+        valid_agents = self.possible_agents
+        agent_coords = {}
+        
+        # 1. Ask TraCI for the exact coordinates of every traffic light
+        for agent in valid_agents:
+            try:
+                lanes = traci.trafficlight.getControlledLanes(agent)
+                if not lanes:
+                    continue
+                    
+                x_sum, y_sum = 0.0, 0.0
+                for lane in lanes:
+                    # Get the shape points of the lane
+                    shape = traci.lane.getShape(lane)
+                    # The last point is where the lane hits the traffic light
+                    x, y = shape[-1]
+                    x_sum += x
+                    y_sum += y
+                    
+                # Find the centre point of the junction
+                avg_x = x_sum / len(lanes)
+                avg_y = y_sum / len(lanes)
+                agent_coords[agent] = (avg_x, avg_y)
+            except Exception:
+                pass
+                
+        # 2. Link each agent to its physically closest neighbours
+        neighbours = {agent: set() for agent in valid_agents}
+        k_neighbours = min(self.k, len(valid_agents) - 1)
+        
+        for agent in valid_agents:
+            if agent not in agent_coords:
+                continue
+                
+            x1, y1 = agent_coords[agent]
+            distances = []
+            
+            for other_agent in valid_agents:
+                if agent == other_agent or other_agent not in agent_coords:
+                    continue
+                
+                x2, y2 = agent_coords[other_agent]
+                # Calculate direct physical distance between the junctions
+                dist = math.hypot(x2 - x1, y2 - y1)
+                distances.append((dist, other_agent))
+                
+            # Sort by shortest distance
+            distances.sort(key=lambda item: item[0])
+            for dist, closest_agent in distances[:k_neighbours]:
+                neighbours[agent].add(closest_agent)
+                neighbours[closest_agent].add(agent)
+                
+        # Fallback for any agents that completely failed to register in TraCI
+        for agent in valid_agents:
+            if not neighbours[agent]:
+                neighbours[agent] = [other for other in valid_agents if other != agent]
+                
+        return {agent: list(agent_neighbours) for agent, agent_neighbours in neighbours.items()}
 
     def action_space(self, agent):
         return self.action_spaces[agent]
 
     def reset(self, seed=None, options=None):
         obs, infos = self.env.reset(seed=seed, options=options)
+        
+        # We trigger the discovery here because the simulation is now guaranteed to be running
+        if self.neighbours is None:
+            self.neighbours = self._discover_neighbours_via_traci()
+            print("\n=============================================")
+            print("Discovered Network Neighbours (Live TraCI):")
+            for a, n in self.neighbours.items():
+                print(f"  {a} -> {n}")
+            print("=============================================\n")
+
         infos = self._update_action_masks(infos)
         return obs, infos
 
@@ -281,12 +240,10 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
         env_actions = {}
         gifting_actions = {}
 
-        # 1. Unpack traffic and gifting actions
         for agent, action in actions.items():
             env_actions[agent] = action[0]
             gifting_actions[agent] = action[1]
 
-        # 2. Step underlying environment with traffic actions only
         obs, rewards, terms, truncs, infos = self.env.step(env_actions)
 
         agent_ids = list(self.agents)
@@ -294,38 +251,38 @@ class ZeroSumRewardWrapper(BaseParallelWrapper):
         if not agent_ids:
             return obs, {}, terms, truncs, infos
 
-        # 3. Apply zero-sum redistribution
-        redistributed = self.calculator.redistribute(
+        # Make sure neighbours are initialised just in case step is somehow called first
+        if self.neighbours is None:
+            self.neighbours = {a: [] for a in agent_ids}
+
+        redistributed, received= self.calculator.redistribute(
             rewards=rewards,
             gifting_actions=gifting_actions,
             agent_ids=agent_ids,
+            neighbours=self.neighbours,
         )
 
-        # 4. Compute gifting stats for logging
         stats = self.calculator.stats(
             rewards=rewards,
             gifting_actions=gifting_actions,
             agent_ids=agent_ids,
         )
 
-        # 5. Attach raw reward and gifting stats to infos for observability
         for agent in agent_ids:
-            infos[agent]["raw_traffic_reward"] = rewards[agent]
-            infos[agent]["gift_fraction"] = (
-                gifting_actions[agent] / self.division
-            )
-            infos[agent]["gift_amount"] = (
-                gifting_actions[agent] / self.division * abs(rewards[agent])
-            )
-            infos[agent]["mean_gift_fraction"] = stats["mean_gift_fraction"]
-            infos[agent]["gift_rate"] = stats["gift_rate"]
-            infos[agent]["mean_gift_amount"] = stats["mean_gift_amount"]
-
+          agent_gift_amt = gifting_actions[agent] / self.division * abs(rewards[agent])
+          infos[agent]["raw_traffic_reward"] = rewards[agent]
+          infos[agent]["gift_fraction"]      = gifting_actions[agent] / self.division
+          infos[agent]["gift_amount"]        = agent_gift_amt
+          infos[agent]["received_amount"]    = received[agent]
+          infos[agent]["net_transfer"]       = received[agent] - agent_gift_amt
+          infos[agent]["mean_gift_fraction"] = stats["mean_gift_fraction"]
+          infos[agent]["gift_rate"]          = stats["gift_rate"]
+          infos[agent]["mean_gift_amount"]   = stats["mean_gift_amount"]
+        
         infos = self._update_action_masks(infos)
         return obs, redistributed, terms, truncs, infos
 
     def _update_action_masks(self, infos):
-        """Append an all-ones mask for the gifting action to the traffic mask."""
         for agent, info in infos.items():
             if "action_mask" in info:
                 traffic_mask = info["action_mask"]
